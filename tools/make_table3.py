@@ -1,0 +1,261 @@
+"""Runs pytest + all control scenarios, writes CSV logs and the tables for the protocol text.
+
+Usage (from the package root):  python tools/make_table3.py
+Outputs:
+  results/pytest.txt, results/junit.xml   - pytest -q output ("N passed") and per-test status
+  results/table3.md / table3.csv          - table 3 of the protocol (pass/fail per row)
+  results/table2_check.md                 - table 2: v6 vs independent reference vs simulation
+  results/detection_1B.md                 - L8 detection ticks for both prediction models
+  results/scenario2_setup.md              - initial conditions of scenario 2 (for R1.7)
+  results/p0_profile.md                   - P0 lane change profile
+  results/env_versions.md                 - table 1 (versions, hashes)
+  logs/*.csv                              - per-physics-frame logs of every control run
+"""
+import hashlib, os, platform, re, subprocess, sys, xml.etree.ElementTree as ET
+from importlib import metadata
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+os.chdir(ROOT)
+os.makedirs("results", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
+
+import numpy as np
+from reference import table2_row, TABLE2_V6
+from rss_shield.params import LENGTH, ACTION_INDEX, K_TAU, ABORT, FALLBACK, TAKEOVER
+from rss_shield.rss import d_min_long
+from rss_shield import scenarios as S
+from rss_shield.shield import V_LAT_OBS
+
+
+def md_table(header, rows):
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
+    return "\n".join(out) + "\n"
+
+
+def f(x, n=4):
+    return "—" if x is None else (f"{x:+.{n}f}" if isinstance(x, float) else str(x))
+
+
+# ------------------------------------------------------------------ 1. pytest
+proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                       "--junitxml=results/junit.xml", "tests"],
+                      capture_output=True, text=True)
+open("results/pytest.txt", "w").write(proc.stdout + proc.stderr)
+status = {}
+for tc in ET.parse("results/junit.xml").getroot().iter("testcase"):
+    bad = any(ch.tag in ("failure", "error") for ch in tc)
+    skip = any(ch.tag == "skipped" for ch in tc)
+    status[tc.get("name")] = "fail" if bad else ("skip" if skip else "pass")
+summary_line = (proc.stdout.strip().splitlines() or ["?"])[-1]
+
+
+def verdict(pattern):
+    names = [n for n in status if re.search(pattern, n)]
+    if not names:
+        return "нет теста"
+    return "pass" if all(status[n] == "pass" for n in names) else "fail"
+
+
+# ------------------------------------------------------------------ 2. scenario 1A (table 2)
+t2 = []
+meas = {}
+for code, (rho, phase) in zip(["L1", "L2", "L3", "L4", "L5", "L6"],
+                              [(0.1, "sync"), (0.1, "worst"), (0.2, "sync"), (0.2, "worst"),
+                               (0.4, "sync"), (0.4, "worst")]):
+    r = S.scenario1A(rho, phase)
+    r.write_csv(f"logs/{r.name}.csv")
+    res, ref, v6 = r.result, table2_row(rho, phase), TABLE2_V6[(rho, phase)]
+    a = [row["a"] for row in r.rows if not row["crashed"]]
+    t2.append([code, rho, "синхр." if phase == "sync" else "худш.", f"{res['d0']:.4f}",
+               "да, t = %.1f с" % v6["t_contact"] if v6["crashed"] else f"нет, {v6['final_gap']:+.3f} м",
+               "да, t = %.1f с" % ref["t_contact"] if ref["crashed"] else f"нет, {ref['final_gap']:+.4f} м",
+               "да, t = %.1f с" % res["t_contact"] if res["crashed"] else f"нет, {res['final_gap']:+.4f} м",
+               f"{res['ego_path']:.3f}" + ("*" if res["crashed"] else ""),
+               f"{res['lead_path']:.3f}", f"[{min(a):.3f}; {max(a):.3f}]",
+               verdict(rf"\[{rho}-{phase}-{code}\]")])
+    meas[code] = (f"контакт t = {res['t_contact']:.1f} с" if res["crashed"]
+                  else f"зазор {res['final_gap']:+.4f} м")
+    meas[code + "_ref"] = (f"контакт t = {ref['t_contact']:.1f} с" if ref["crashed"]
+                           else f"зазор {ref['final_gap']:+.4f} м")
+with open("results/table2_check.md", "w") as fh:
+    fh.write("# Таблица 2: v6 / независимый эталон (tests/reference.py) / симуляция highway-env\n\n")
+    fh.write(md_table(["Строка", "ρ, с", "Фаза", "d0, м", "v6", "Эталон", "Симуляция",
+                       "Путь ego, м", "Путь лидера, м", "a по кадрам до контакта", "Итог"], t2))
+    fh.write("\n(*) путь до момента контакта и после него: после контакта highway-env меняет траекторию.\n")
+
+r_once = S.scenario1A(0.2, "sync", slower_instead="once"); r_once.write_csv(f"logs/{r_once.name}.csv")
+r_every = S.scenario1A(0.2, "sync", slower_instead="every_tick"); r_every.write_csv(f"logs/{r_every.name}.csv")
+meas["L7"] = (f"однократный SLOWER: контакт t = {r_once.result['t_contact']:.1f} с; "
+              f"SLOWER на каждом такте: " +
+              (f"контакт t = {r_every.result['t_contact']:.1f} с" if r_every.result["crashed"]
+               else f"контакта нет, зазор {r_every.result['final_gap']:+.2f} м"))
+
+# ------------------------------------------------------------------ 3. scenario 1B (L8)
+det_rows, det = [], {}
+for rho in (0.1, 0.2, 0.4):
+    row = [rho]
+    for model in ("nominal", "worst_case"):
+        r = S.scenario1B(rho, model)
+        r.write_csv(f"logs/{r.name}.csv")
+        det[(rho, model)] = r.result["detect_tick"]
+        row.append(f"такт {r.result['detect_tick']} (t = {0.2 * r.result['detect_tick']:.1f} с)")
+    det_rows.append(row)
+with open("results/detection_1B.md", "w") as fh:
+    fh.write("# Сценарий 1B: такт, на котором A_safe = ∅ (лидер −8 м/с² с первого кадра, d0 = d_min + 0.5 м)\n\n")
+    fh.write(md_table(["ρ, с", "long_prediction = nominal", "long_prediction = worst_case"], det_rows))
+meas["L8"] = "; ".join(f"ρ={rho}: nominal→{det[(rho, 'nominal')]}, worst_case→{det[(rho, 'worst_case')]}"
+                       for rho in (0.1, 0.2, 0.4))
+
+# ------------------------------------------------------------------ 4. stop / release / random
+r = S.scenario_stop(); r.write_csv(f"logs/{r.name}.csv")
+v = [row["v_end"] for row in r.rows]
+k0 = next(i for i, x in enumerate(v) if x == 0.0)
+xs = {round(row["x_end"], 9) for row in r.rows if row["v_start"] == 0.0}
+meas["S1"] = (f"v = 0 на кадре {k0} (t_end = {r.rows[k0]['t_end']:.1f} с), min v = {min(v):.3g}, "
+              f"a ∈ [{min(row['a'] for row in r.rows):.3f}; {max(row['a'] for row in r.rows[K_TAU:]):.3f}]")
+meas["S2"] = f"кадров с v = 0: {sum(1 for row in r.rows if row['v_start'] == 0.0)}, различных x: {len(xs)}"
+r1 = S.scenario_release(); r1.write_csv(f"logs/{r1.name}.csv")
+r2 = S.scenario_release(standstill=True, then="FASTER"); r2.write_csv(f"logs/{r2.name}.csv")
+f_rel = 2 * 5 + K_TAU
+meas["S3"] = (f"движение: target после снятия = {r1.rows[f_rel]['target_speed']:.0f} м/с при v = "
+              f"{r1.rows[f_rel - 1]['v_end']:.2f}, max a после снятия = {max(row['a'] for row in r1.rows[f_rel:]):+.3f}; "
+              f"с места: a = {r2.rows[f_rel]['a']:.1f} (a_ctrl = {r2.rows[f_rel]['a_ctrl']:.2f}) с кадра {f_rel}")
+err, amin, amax, cmin, cmax = 0.0, 9, -9, 0, 0
+for seed in range(5):
+    rr = S.scenario_random(seed)
+    if seed == 0:
+        rr.write_csv(f"logs/{rr.name}.csv")
+    for row in rr.rows:
+        err = max(err, abs(row["a_integrated"] - row["a"]))
+        amin, amax = min(amin, row["a"]), max(amax, row["a"])
+        cmin, cmax = min(cmin, row["a_ctrl"]), max(cmax, row["a_ctrl"])
+meas["A1"] = (f"max abs(Δv/dt − a) = {err:.1e}; a ∈ [{amin:.2f}; {amax:.2f}] при a_ctrl ∈ [{cmin:.2f}; {cmax:.2f}] "
+              f"(5 случайных последовательностей × 300 кадров + строки таблицы 2)")
+
+# ------------------------------------------------------------------ 5. scenario 2
+r = S.scenario2a(T=4.0); r.write_csv(f"logs/{r.name}.csv")
+ys = [row["y_end"] for row in r.rows]
+passed = next(row["frame"] for row in r.rows if row["R_x"] - row["x_end"] >= LENGTH)
+m0 = [int(d.mask[ACTION_INDEX["LANE_LEFT"]]) for tick, t, d in r.decisions if 2 * tick <= passed]
+meas["T2a"] = (f"M0 = {sorted(set(m0))} на {len(m0)} тактах до выхода R вперёд на L (кадр {passed}); "
+               f"a_exec = {sorted({d.a_exec for tick, t, d in r.decisions if 2 * tick <= passed})}; "
+               f"y ∈ [{min(ys[:passed + 1]):.3f}; {max(ys[:passed + 1]):.3f}]; контакт: {r.t_contact or 'нет'}")
+
+
+def cmds(rr):
+    return [(round(t, 1), d.command) for _, t, d in rr.decisions if d.command != "IDLE"]
+
+
+r = S.scenario2b("i", model="observed"); r.write_csv(f"logs/{r.name}.csv")
+tl = [row["target_lane_index"] for row in r.rows]
+ret = next(i for i in range(3, len(tl)) if tl[i] == 1)
+meas["T2b-i"] = (f"команды {cmds(r)}; target_lane_index → 1 на кадре {ret} (t = {0.1 * ret:.1f} с); "
+                 f"итог y = {r.rows[-1]['y_end']:.3f}; контакт: {r.t_contact or 'нет'}")
+r = S.scenario2b("iii", model="observed", T=8.0); r.write_csv(f"logs/{r.name}_reactiveR.csv")
+fb = [row["frame"] for row in r.rows if row["fallback"]]
+meas["T2b-iii"] = (f"команды {cmds(r)}; fallback = 1 на кадрах {fb[0]}–{fb[-1]}; "
+                   f"контакт (R по RSS): {r.t_contact or 'нет'}")
+r = S.scenario2b("iii", model="observed", T=10.0, rear_reactive=False); r.write_csv(f"logs/{r.name}_nonreactiveR.csv")
+meas["T2b-iii"] += f"; контакт (R без реакции, 28 м/с): t = {r.t_contact} с, удар сзади → CR_env"
+r = S.scenario2b("i", model="occupancy"); r.write_csv(f"logs/{r.name}.csv")
+meas["T2b-occ"] = f"маска на такте 0: {''.join(map(str, r.decisions[0][2].mask))}; команды {cmds(r) or 'только IDLE'}"
+
+with open("results/scenario2_setup.md", "w") as fh:
+    fh.write("# Начальные условия сценария 2 (для R1.7). Дорога: 4 полосы, ширина 4 м, центр полосы i: y = 4i.\n\n")
+    g = d_min_long(28.0, 20.0, 0.4) + 1.0
+    fh.write(md_table(["Подтест", "Участник", "Полоса", "x (центр), м", "y, м", "v, м/с", "Поведение"], [
+        ["2a", "ego", 1, 100.0, 4.0, 20.0, "политика LANE_LEFT на каждом такте, ρ = 0.4"],
+        ["2a", "R", 0, f"{100 - LENGTH - 18:.1f} (зазор 18.0)", 0.0, 28.0, "скрипт, v = const"],
+        ["2b", "ego", 1, 100.0, 4.0, 20.0, "LANE_RIGHT на такте 0, далее IDLE"],
+        ["2b", "N", 3, f"{100 + LENGTH + 40:.1f} (зазор 40.0)", 12.0, 20.0,
+         "с t_b = 0.2 с перестроение в полосу 2 (штатный регулятор highway-env)"],
+        ["2b-iii", "R", 1, f"{100 - LENGTH - g:.2f} (зазор d_min(28,20,0.4)+1 = {g:.2f})", 4.0, 28.0,
+         "RSS-совместимый: тормозит −4 через ρ, если зазор < d_min; вариант без реакции — v = const"],
+    ]))
+    fh.write(f"\nНаблюдаемое перестроение соседа: |v_lat| > {V_LAT_OBS} м/с (adjacent_lane_model = observed).\n")
+
+# ------------------------------------------------------------------ 6. P0
+p0 = [S.profile_lane_change(vv) for vv in (15.0, 20.0, 25.0, 30.0)]
+with open("results/p0_profile.md", "w") as fh:
+    fh.write("# P0: профиль штатного перестроения highway-env (каскадный регулятор, dt = 0.1 с)\n\n")
+    fh.write(md_table(["v, м/с", "Длительность (до отклонения < 0.1 м от центра целевой полосы), с", "Пик v_lat, м/с", "Пик a_lat, м/с²"],
+                      [[p["v"], f"{p['duration']:.1f}", f"{p['vlat_peak']:.2f}", f"{p['alat_peak']:.2f}"] for p in p0]))
+meas["P0"] = (f"длительность {min(p['duration'] for p in p0):.1f}–{max(p['duration'] for p in p0):.1f} с; "
+              f"пик v_lat {min(p['vlat_peak'] for p in p0):.2f}–{max(p['vlat_peak'] for p in p0):.2f} м/с; "
+              f"пик a_lat {min(p['alat_peak'] for p in p0):.2f}–{max(p['alat_peak'] for p in p0):.2f} м/с²")
+
+# ------------------------------------------------------------------ 7. table 3
+rows3 = [
+    ["F1–F6", "pytest FIFO (R1.5)", "—", "порядок, задержка ровно 2 кадра, пустые слоты, TAKEOVER, снятие, act() без аргумента",
+     "точное", "см. results/pytest.txt", verdict(r"^test_F\d")],
+]
+for code, rho, ph in [("L1", 0.1, "синхр."), ("L2", 0.1, "худш."), ("L3", 0.2, "синхр."),
+                      ("L4", 0.2, "худш."), ("L5", 0.4, "синхр."), ("L6", 0.4, "худш.")]:
+    tol = "±0.1 с" if "контакт" in meas[code + "_ref"] else "±0.01 м"
+    rows3.append([code, f"Сценарий 1A, {ph}", rho, meas[code + "_ref"], tol, meas[code],
+                  verdict(rf"-{code}\]")])
+rows3 += [
+    ["L7", "SLOWER вместо перехвата", 0.2, "контакт, t ≈ 4.2 с (однократный SLOWER)", "±0.1 с", meas["L7"], verdict(r"^test_L7")],
+    ["L8", "Сценарий 1B", "0.1/0.2/0.4", "nominal → такт 1, worst_case → такт 0", "точное", meas["L8"], verdict(r"^test_L8")],
+    ["S1", "Торможение до остановки", 0.4, "v ≥ 0, a = −4 до остановки, последний кадр a = −v/dt", "точное", meas["S1"], verdict(r"^test_S1")],
+    ["S2", "Удержание v = 0", 0.4, "v = 0, x = const", "точное", meas["S2"], verdict(r"^test_S2")],
+    ["S3", "Снятие перехвата", 0.4, "нет разгона до прихода команды; target синхронизирован", "точное", meas["S3"], verdict(r"^test_S3")],
+    ["A1", "Пределы ускорения по кинематике", "все", "max abs(Δv/dt − a) ≤ 1e−9; a ∈ [−8; 3], перехват [−8; −4]", "1e−9", meas["A1"], verdict(r"^test_A1")],
+    ["T2a", "2a", 0.4, "M0 = 0 при d_long < d_min, a_exec = IDLE, y = const, нет контакта", "точное", meas["T2a"], verdict(r"^test_T2a")],
+    ["T2b-i", "2b-i", 0.4, "ABORT на такте 2 (t = 0.4 с), возврат target на кадре 6", "точное", meas["T2b-i"], verdict(r"^test_T2b_i_")],
+    ["T2b-iii", "2b-iii", 0.4, "FALLBACK на такте 2, флаг fallback с кадра 6", "точное", meas["T2b-iii"], verdict(r"^test_T2b_iii")],
+    ["T2b-occ", "2b, модель occupancy", 0.4, "LANE_RIGHT запрещён на такте 0", "точное", meas["T2b-occ"], verdict(r"^test_T2b_occ")],
+    ["E1–E3", "Интеграция с HighwayEnv.step()", 0.4, "задержка и ограничитель внутри _simulate()", "1e−9", "см. results/pytest.txt", verdict(r"^test_E\d")],
+    ["R0", "Формулы RSS", "—", "43.4638 / 47.9175 / 56.9825 / 93.02; d_lat(0,0,0.4) = 0.86", "5e−3", "см. results/pytest.txt", verdict(r"^test_R0")],
+    ["P0", "Профиль манёвра highway-env", "—", "описательно", "—", meas["P0"], verdict(r"^test_P0")],
+]
+header = ["Строка", "Тест", "ρ", "Эталон", "Допуск", "Результат", "Итог"]
+all_pass = all(r[-1] == "pass" for r in rows3)
+with open("results/table3.md", "w") as fh:
+    fh.write("# Таблица 3. Результаты контрольных тестов\n\n")
+    fh.write(md_table(header, rows3))
+    fh.write(f"\npytest: {summary_line}\n\nВсе строки pass: {'да' if all_pass else 'НЕТ'}. "
+             "Основная серия запускается только при pass во всех строках.\n")
+import csv
+with open("results/table3.csv", "w", newline="") as fh:
+    w = csv.writer(fh); w.writerow(header); w.writerows(rows3)
+
+# ------------------------------------------------------------------ 8. table 1 (versions)
+def ver(p):
+    try:
+        return metadata.version(p)
+    except metadata.PackageNotFoundError:
+        return "не установлен"
+
+
+def sha(path):
+    h = hashlib.sha256()
+    for dp, dn, fn in sorted(os.walk(path)):
+        dn.sort()
+        for name in sorted(fn):
+            if name.endswith(".py"):
+                h.update(open(os.path.join(dp, name), "rb").read())
+    return h.hexdigest()[:16]
+
+
+try:
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip() or "нет git"
+except Exception:
+    commit = "нет git"
+with open("results/env_versions.md", "w") as fh:
+    fh.write("# Таблица 1. Программное окружение\n\n")
+    fh.write(md_table(["Компонент", "Версия"], [
+        ["Python", platform.python_version()], ["ОС", platform.platform()],
+        ["highway-env", ver("highway-env")], ["gymnasium", ver("gymnasium")],
+        ["numpy", ver("numpy")], ["pytest", ver("pytest")], ["pygame / pygame-ce", f"{ver('pygame')} / {ver('pygame-ce')}"],
+        ["torch (для DQN)", ver("torch")], ["stable-baselines3 (если используется)", ver("stable-baselines3")],
+        ["git commit", commit],
+        ["sha256 (rss_shield/*.py)", sha("rss_shield")], ["sha256 (tests/*.py)", sha("tests")],
+    ]))
+
+print(summary_line)
+print("table 3:", "ALL PASS" if all_pass else "FAILURES: " + ", ".join(r[0] for r in rows3 if r[-1] != "pass"))
+sys.exit(0 if all_pass and proc.returncode == 0 else 1)

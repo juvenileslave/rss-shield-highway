@@ -1,0 +1,5 @@
+# Exact versions used to build and check the package (table 1 of the protocol).
+highway-env==1.12.1
+gymnasium==1.4.0
+numpy>=2.0
+pytest>=8.0
