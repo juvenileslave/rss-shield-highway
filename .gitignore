@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+# артефакты запусков — генерируются run_all.sh
+/results/
+/logs/
+# обучение: чекпойнты и большие журналы в git не кладутся
+checkpoints/
+*.pt
+*.pth
+*.zip
+wandb/
+tb_logs/
+~$*.docx
+# замеры sim/bench.py и кэш стартовых состояний (генерируются)
+sim/bench_*.json
+start_states/
