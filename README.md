@@ -28,8 +28,9 @@ PYTHON=python ./run_all.sh     # код выхода 0 = все строки т�
 | `rss_shield/` | подкласс `MDPVehicle` (FIFO на 2 кадра, ограничители), фильтр с маской и иерархией, сценарии, интеграция с `HighwayEnv` |
 | `tests/` | 67 pytest-тестов; `tests/reference.py` — независимый эталон таблицы 2 |
 | `tools/make_table3.py` | сборка `results/table3.md` и `table3.csv` из журналов и pytest |
-| `expected/` | эталонный прогон проверяющего |
-| `runs/v9_author_run/` | зафиксированный прогон автора к v9 (`results/`, `logs/`) |
+| `expected/` | эталонный прогон пакета верификации |
+| `runs/verification_run/` | зафиксированный контрольный прогон (`results/`, `logs/`) |
+| `sim/` | точное ускорение highway-env 1.12.1 и побитовый тест эквивалентности `sim/test_fast_road.py` |
 | `docs/protocol/` | протокол исследования (`Протокол_исследования_RSS-фильтр.docx`) |
 | `experiments/`, `configs/` | заготовки под обучение, сиды и сетку D × ρ |
 | `.github/workflows/verify.yml` | CI: Python 3.13 и 3.14, сверка `table3.csv` с эталоном |
