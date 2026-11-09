@@ -162,8 +162,9 @@ def test_Q4_journal_abort_statuses():
     assert [row["frame"] for row in act] == [6, 7]   # active after the FIFO delay
     assert all(row["active_sup"] == 1 and row["brake_mode"] == 0 and row["return_active"] == 1
                for row in act)
-    ticks = [row for row in rows if row["decision_tick"]]
-    assert all(row["policy_step"] + row["intervention"] == 1 for row in ticks)
+    # both flags describe the whole decision interval and are set by its decision tick
+    assert all(row["policy_step"] + row["intervention"] == 1 for row in rows)
+    assert rows[1]["policy_step"] == 1 and rows[5]["policy_step"] == 0
 
 
 def test_Q4b_journal_takeover_and_fallback_statuses():

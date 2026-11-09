@@ -54,7 +54,7 @@ SEEDS = {
     "diag": list(range(900_092, 900_095)),      # rho = 0.6 vs 1.0 diagnostic
 }
 QUICK_SEEDS = {"warmup": 3, "start10": 2, "start25": 2, "train": 50, "eval": 1, "diag": 1}
-LC_GRID_STEPS = 60          # decision steps per start state in the lane-change grid (review of PR #4)
+LC_GRID_STEPS = 60          # decision steps per start state in the lane-change grid
 LC_PREF = {"LANE_LEFT": 0.0, "IDLE": 1.0, "LANE_RIGHT": 0.0, "FASTER": 0.0, "SLOWER": 0.5}
 
 
@@ -312,7 +312,7 @@ def diagnostic(args, seeds, cache):
 
 
 def lane_change_grid(seeds_by_D, cache, n_steps=LC_GRID_STEPS, models=("occupancy", "observed")):
-    """Admissibility of lane changes on the main generator (review of PR #4, item 3): share of
+    """Admissibility of lane changes on the main generator: share of
     decision ticks with LANE_LEFT or LANE_RIGHT in A_safe over the (D, rho) grid. Fixed policy
     IDLE, otherwise SLOWER (LC_PREF, not trained); the same cached start states for every rho and
     adjacent-lane model; at most n_steps decision steps per start state. Blocks of each lane
@@ -396,7 +396,7 @@ def report(args, R):
     a(f"## 1. Прогрев (п. 7.6): D = 40, {w['n']} сидов")
     a("")
     a(table(["средняя скорость 10–15 с, м/с", "15–20 с, м/с", "разница (по всем сидам)",
-                "максимум по сиду", "сидов < 2 %", "критерий < 2 %"],
+                "максимум по сиду", "сидов < 2 %", "критерий < 2 % (по всем сидам)"],
             [[w["v10_15"], w["v15_20"], f"{100 * w['pooled']:.2f} %", f"{100 * w['max_seed']:.2f} %",
               f"{w['n_seed_ok']} из {w['n']}", "выполнен" if w["passed"] else "НЕ выполнен"]]))
     a("")

@@ -6,9 +6,12 @@ end of the frame. Decision ticks are frames with k % 2 == 0 (t_k = 0.0, 0.2, ...
 
 Status columns (protocol 7.5): supervisory intervention, active command and forced
 braking are logged separately.
-  policy_step   - 1 on a decision frame whose command came from the policy (after the mask);
+  policy_step   - 1 on both frames of a decision interval whose command came from the policy
+                  (after the mask): policy step, part of the exposure E;
   intervention  - 1 on both frames of a decision interval governed by a supervisory decision
-                  (TAKEOVER / ABORT / FALLBACK): intercept step, not part of the exposure E;
+                  (TAKEOVER / ABORT / FALLBACK): intercept step, not part of the exposure E.
+                  Both flags are set by the decision tick of the interval (both 0 if no command
+                  was issued at that tick);
   sup_cmd       - that supervisory command ("" otherwise);
   active_cmd    - command that left the FIFO last (acts now); active_sup - it is supervisory;
   brake_mode    - forced braking limiter [-8, -4] is on (TAKEOVER / FALLBACK active);
@@ -101,6 +104,7 @@ class Runner:
         self.t_contact = None
         self.last = dict(command="", a_pi="", a_exec="", mask="", reason="")
         self.sup = ""                        # supervisory command of the current decision interval
+        self.pol = 0                         # 1 if the current decision interval is a policy step
 
     def run(self, T, stop=None, stop_after_crash=0.0):
         n = int(round(T / DT))
@@ -110,14 +114,13 @@ class Runner:
             t = round(k * DT, 10)
             tick = k % FRAMES_PER_DECISION == 0
             dec = None
-            policy_step = 0
             if tick:
                 dec = self.controller(k // FRAMES_PER_DECISION, t, self)
                 if dec["command"] is not None:
                     ego.act(dec["command"])
                 self.last = dec
                 self.sup = dec["command"] if dec["command"] in SUPERVISORY else ""
-                policy_step = int(dec["command"] is not None and not self.sup)
+                self.pol = int(dec["command"] is not None and not self.sup)
             v_start = float(ego.speed)
             pending = ego.pending
             self.road.act()
@@ -131,7 +134,7 @@ class Runner:
                        a_exec=(dec.get("a_exec") or "") if dec else "",
                        mask=_mask_str(dec.get("mask")) if dec else "",
                        reason=(dec.get("reason") or "") if dec else "",
-                       policy_step=policy_step, intervention=int(bool(self.sup)),
+                       policy_step=self.pol, intervention=int(bool(self.sup)),
                        sup_cmd=self.sup, active_sup=int(ego.sup_active),
                        brake_mode=int(ego.brake_mode), return_active=int(ego.return_active),
                        fallback=int(ego.fallback), abort_ignored=int(ego.abort_ignored),

@@ -15,9 +15,16 @@ Accounting (protocol 7.7):
                    that direction; BLCR_rss = (N_blocked - N_busy - N_no_lane) /
                    (N_att - N_busy - N_no_lane) counts RSS blocks only;
   N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR);
-  N_exec           lane markings crossed by the ego (lane_index changed during a step);
-  N_exec_int       of them, crossings while a supervisory command is active (maneuver completed
-                   under TAKEOVER / FALLBACK); they remain in N_exec;
+  N_exec           lane markings crossed by the ego (lane_index changed during a step). Each
+                   crossing is attributed to the policy step at which its maneuver started:
+                   supervisory commands never start a lane change (TAKEOVER keeps the lateral
+                   target of the maneuver already started, ABORT is offered only before the
+                   marking is crossed, FALLBACK holds the lane containing the ego centre), so
+                   every crossing belongs to a LANE_LEFT / LANE_RIGHT executed at a policy step
+                   and N_exec is counted on the same exposure E as N_att;
+  N_exec_int       of them, crossings that physically occur while a supervisory command is active
+                   (maneuver completed under TAKEOVER / FALLBACK); reported separately, they
+                   remain in N_exec;
   masked           policy steps where the executed command differs from a_pi;
   R_int            (masked + intercept steps) / all steps.
 """
