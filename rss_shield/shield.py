@@ -9,7 +9,7 @@ where the lateral part follows the operational definition of protocol 7.7 (the s
 t_danger and the start label): for a neighbour whose body overlaps the ego laterally (clearance
 < 0, e.g. the ego lane) the longitudinal threshold alone decides; for any other neighbour the
 lateral threshold counts only while the lateral clearance decreases (closing speed > V_LAT_OBS).
-Without this condition d_min_lat(0, 0, rho) > LANE_WIDTH - WIDTH = 2 m for rho > ~0.86 s and two
+Without this condition d_min_lat(0, 0, rho) > LANE_WIDTH - WIDTH = 2 m for rho > ~0.82 s and two
 vehicles driving side by side in the centres of adjacent lanes would be "dangerous" (IDLE
 forbidden next to any adjacent-lane neighbour at rho = 1.0). lateral_rule="rss" restores the
 strict RSS threshold (diagnostic only).

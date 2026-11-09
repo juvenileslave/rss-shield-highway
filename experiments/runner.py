@@ -16,14 +16,20 @@ Accounting (protocol 7.7):
                    N_blocked_rss = N_blocked - N_busy - N_no_lane are the RSS attempts / blocks
                    used by the models of H3 and BLCR_rss = N_blocked_rss / N_att_rss;
   N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR);
-  N_exec           executed lane changes, counted by the step that started the maneuver: a crossing
-                   of a lane marking (lane_index changed) is attributed to the policy step that
-                   issued that lane-change command (journal column exec_from), so every counted
-                   lane change belongs to the exposure E even if the crossing itself happens on an
-                   intercept step (offset log E of the N_exec model is consistent);
+  N_exec           executed lane changes, counted by the step that started the maneuver. vehicle.py
+                   executes LANE_LEFT / LANE_RIGHT from target_lane_index when the command leaves
+                   the FIFO, so a maneuver is registered when the command actually moves
+                   target_lane_index away from the lane of the ego, with the decision step that
+                   issued it; a return of the target to the current lane before the crossing (the
+                   opposite lane change, i.e. a reversal, ABORT or FALLBACK) cancels the record. A
+                   crossing of a lane marking (lane_index changed) takes the oldest open record of
+                   its direction (journal column exec_from), so every counted lane change belongs to
+                   the exposure E even if the crossing itself happens on an intercept step (offset
+                   log E of the N_exec model is consistent);
   N_exec_int       of them, crossings while a supervisory command is active (maneuver completed
                    under TAKEOVER / FALLBACK); they remain in N_exec;
-  N_exec_other     crossings without a policy-issued lane-change command (expected 0, checked);
+  N_exec_other     crossings without an open record of a policy-issued lane change (expected 0,
+                   checked);
   masked           policy steps where the executed command differs from a_pi;
   R_int            (masked + intercept steps) / all steps;
   ttc_pen, col_pen sums of the TTC and collision penalties of R_RS over the episode (0 for R_v);
@@ -121,7 +127,6 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     ego = env.vehicle
     cfg = dict(MAIN_SERIES if shield_cfg is None else shield_cfg)
     shield = RSSShield(ego, ShieldConfig(rho=rho, **cfg)) if shield_on else None
-    n_lanes = int(env.config.get("lanes_count", 4))
     asm = TransitionAssembler(agent.cfg["gamma"], agent.buffer.add) if train else None
     c = dict(steps=0, E=0, intercept=0, takeover=0, abort=0, fallback=0, N_att=0, N_blocked=0,
              N_busy=0, N_no_lane=0, N_att_int=0, N_exec=0, N_exec_int=0, N_exec_other=0,
@@ -130,7 +135,8 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
              crash_intercept=False, crash_sup_active=False, crash_rear=False,
              t_policy=0.0, t_shield=0.0, t_env=0.0, t_learn=0.0)
     x0, lane_prev = float(ego.position[0]), ego.lane_index[2]
-    pending_lc = []                 # decision steps of policy-issued lane changes not crossed yet
+    in_fifo = {}                    # FIFO exit frame -> (decision step, policy step) of the command
+    open_lc = []                    # lane changes started, not crossed yet: (step or None, direction)
     del ego.acc_log[:]
     k, term, trunc = 0, False, False
     while not (term or trunc):
@@ -158,19 +164,15 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
                     c["N_busy"] += int(bool(why.get("busy")))
                     c["N_no_lane"] += int(bool(why.get("no_lane")))
             c["masked"] += int(cmd != a_pi)
-            if cmd in LANE_CHANGES:
-                lane_to = ego.lane_index[2] + (-1 if cmd == "LANE_LEFT" else 1)
-                if 0 <= lane_to < n_lanes:
-                    pending_lc.append(k)
             if asm is not None:
                 asm.policy_step(obs, mask, ACTION_INDEX[cmd], meta=(episode, k))
         else:
             c["intercept"] += 1
             c[SUP_KEY[cmd]] += 1
             c["N_att_int"] += int(a_pi in LANE_CHANGES)
-            if cmd == ABORT and pending_lc:
-                pending_lc.pop()            # the maneuver is cancelled before the crossing
         queued = queued_command(ego)
+        in_fifo[ego.frame + ego.k_tau] = (k, policy)
+        target_prev = ego.target_lane_index[2]
         obs2, _, term, trunc, _ = env.step(cmd)
         t3 = time.perf_counter()
         r, parts = step_reward(reward_kind, ego, env.road)
@@ -180,12 +182,26 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
         c["col_pen"] += float(parts.get("col_pen", 0.0))
         if asm is not None:
             asm.reward(r)
+        # commands that left the FIFO during this step (K_TAU = FRAMES_PER_DECISION: the command of
+        # the previous decision step, on the first frame, i.e. before any crossing of this step)
+        left = [in_fifo.pop(f) for f in sorted(in_fifo) if f < ego.frame]
+        target_now = ego.target_lane_index[2]
+        if target_now != target_prev:
+            d, n = int(np.sign(target_now - lane_prev)), abs(target_now - lane_prev)
+            if open_lc and open_lc[-1][1] != d:
+                del open_lc[:]          # reversal before the crossing: cancelled, as by ABORT
+            del open_lc[n:]
+            if len(open_lc) < n:
+                src = left[-1] if left else (None, False)
+                open_lc.append((src[0] if src[1] else None, d))
         lane_now = ego.lane_index[2]
         crossed = lane_now != lane_prev
         exec_from = ""
         if crossed:
-            if pending_lc:
-                exec_from = pending_lc.pop(0)
+            rec = (open_lc.pop(0) if open_lc and open_lc[0][1] == np.sign(lane_now - lane_prev)
+                   else None)
+            if rec is not None and rec[0] is not None:
+                exec_from = rec[0]
                 c["N_exec"] += 1
                 c["N_exec_int"] += int(ego.sup_active)
             else:

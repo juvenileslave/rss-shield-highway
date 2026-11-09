@@ -1,21 +1,21 @@
 """Regression tests for the lateral rule shared by the filter and
 the danger label, and the prediction model of vehicles in the lane-change lanes (protocol 7.7).
 
-L1 - neighbour centred in the adjacent lane inside d_min_long, no lateral motion: at rho = 1.0
-     d_min_lat(0, 0) = 2.75 m > 2.0 m (side gap of adjacent lanes), but there is no lateral
-     approach -> no dangerous situation: IDLE admissible, danger label 0 (the strict RSS rule
-     lateral_rule="rss" is kept as a diagnostic only);
-L2 - the same neighbour moving towards the ego -> IDLE forbidden, danger label 1;
-L3 - rear vehicle in the target lane (case D = 10, rho = 0.1): the worst-case
-     prediction forbids the lane change, the nominal prediction of the main series admits it;
-L4 - nominal prediction refuted by observation (the rear vehicle accelerates after the start):
-     re-check every tick -> ABORT before the crossing, no contact;
-L5 - the same, but the violation becomes visible only after the crossing: FALLBACK; an
-     RSS-compliant follower avoids contact, a non-reacting one hits the ego from behind
-     (contact by the rear vehicle, CR_env): documented limitation of the nominal model;
-L6 - T2b-i under the nominal prediction: no ABORT is needed (gap 40 m >= d_min_long 39.42 m),
-     the lane change is completed without a dangerous situation;
-L7 - ShieldConfig rejects unknown model names.
+LR1 - neighbour centred in the adjacent lane inside d_min_long, no lateral motion: at rho = 1.0
+      d_min_lat(0, 0) = 2.75 m > 2.0 m (side gap of adjacent lanes), but there is no lateral
+      approach -> no dangerous situation: IDLE admissible, danger label 0 (the strict RSS rule
+      lateral_rule="rss" is kept as a diagnostic only);
+LR2 - the same neighbour moving towards the ego -> IDLE forbidden, danger label 1;
+LR3 - rear vehicle in the target lane (case D = 10, rho = 0.1): the worst-case
+      prediction forbids the lane change, the nominal prediction of the main series admits it;
+LR4 - nominal prediction refuted by observation (the rear vehicle accelerates after the start):
+      re-check every tick -> ABORT before the crossing, no contact;
+LR5 - the same, but the violation becomes visible only after the crossing: FALLBACK; an
+      RSS-compliant follower avoids contact, a non-reacting one hits the ego from behind
+      (contact by the rear vehicle, CR_env): documented limitation of the nominal model;
+LR6 - T2b-i under the nominal prediction: no ABORT is needed (gap 40 m >= d_min_long 39.42 m),
+      the lane change is completed without a dangerous situation;
+LR7 - ShieldConfig rejects unknown model names.
 """
 import pytest
 
@@ -56,8 +56,8 @@ def _rear_accelerating(gap, acc, lc_prediction="nominal", follow=None, rho=0.4, 
     return m0, r
 
 
-# ---------------------------------------------------------------- L1, L2: lateral rule
-def test_L1_centred_adjacent_neighbour_is_not_dangerous():
+# -------------------------------------------------------------- LR1, LR2: lateral rule
+def test_LR1_centred_adjacent_neighbour_is_not_dangerous():
     rho = 1.0
     assert d_min_lat(0.0, 0.0, rho) == pytest.approx(2.75)          # > 2.0 m: strict RSS flags it
     road, ego, n = _adjacent_scene(rho, 0.0)
@@ -71,7 +71,7 @@ def test_L1_centred_adjacent_neighbour_is_not_dangerous():
 
 
 @pytest.mark.parametrize("model", ["observed", "occupancy"])
-def test_L2_approaching_adjacent_neighbour_forbids_idle(model):
+def test_LR2_approaching_adjacent_neighbour_forbids_idle(model):
     rho = 1.0
     road, ego, n = _adjacent_scene(rho, -0.05)                      # ~1.25 m/s towards the ego
     cfg = ShieldConfig(rho=rho, adjacent_lane_model=model, lc_prediction="nominal")
@@ -80,8 +80,8 @@ def test_L2_approaching_adjacent_neighbour_forbids_idle(model):
     assert _danger(ego, [n], rho)["danger"]
 
 
-# ---------------------------------------------------------------- L3-L6: lc prediction
-def test_L3_rear_vehicle_in_target_lane_worst_case_vs_nominal():
+# ------------------------------------------------------------ LR3-LR6: lc prediction
+def test_LR3_rear_vehicle_in_target_lane_worst_case_vs_nominal():
     v, rho, gap = 23.6, 0.1, 54.0
     assert gap > d_min_long(v, v, rho) + 10.0                       # 38.97 m: the gap is safe now
     res = {}
@@ -95,7 +95,7 @@ def test_L3_rear_vehicle_in_target_lane_worst_case_vs_nominal():
     assert res["nominal"] == (1, {})
 
 
-def test_L4_nominal_prediction_refuted_by_observation_gives_abort():
+def test_LR4_nominal_prediction_refuted_by_observation_gives_abort():
     m0, r = _rear_accelerating(44.0, 2.0, follow=0.4)
     rows = r.rows
     assert m0[LR] == 1                                               # admissible at t = 0
@@ -108,7 +108,7 @@ def test_L4_nominal_prediction_refuted_by_observation_gives_abort():
     assert m0_wc[LR] == 0                                            # worst case: not admissible
 
 
-def test_L5_nominal_prediction_relies_on_rss_compliant_follower():
+def test_LR5_nominal_prediction_relies_on_rss_compliant_follower():
     for follow, contact in ((0.4, False), (None, True)):
         m0, r = _rear_accelerating(45.0, 2.0, follow=follow, T=8.0)
         rows = r.rows
@@ -126,7 +126,7 @@ def test_L5_nominal_prediction_relies_on_rss_compliant_follower():
     assert m0_wc[LR] == 0
 
 
-def test_L6_T2b_i_under_nominal_prediction():
+def test_LR6_T2b_i_under_nominal_prediction():
     assert d_min_long(20.0, 20.0, 0.4) == pytest.approx(39.42, abs=1e-2)
     rows = S.scenario2b("i", model="observed", lc_prediction="nominal").rows
     assert not any(row["sup_cmd"] for row in rows)                  # gap 40 m >= 39.42 m: no ABORT
@@ -134,7 +134,7 @@ def test_L6_T2b_i_under_nominal_prediction():
     assert not any(row["crashed"] for row in rows) and not any(row["danger"] for row in rows)
 
 
-def test_L7_shield_config_rejects_unknown_models():
+def test_LR7_shield_config_rejects_unknown_models():
     for kw in (dict(lc_prediction="optimistic"), dict(lateral_rule="none"),
                dict(adjacent_lane_model="all"), dict(long_prediction="x")):
         with pytest.raises(ValueError):
