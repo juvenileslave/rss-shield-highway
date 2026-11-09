@@ -9,7 +9,10 @@
 5. saving and loading the model;
 6. evaluation episodes of the loaded model (epsilon = 0) with the step journal and the counters;
 7. diagnostic of the lateral threshold for adjacent lanes: a fixed IDLE policy at rho = 0.6 and
-   1.0 on the same start states.
+   1.0 on the same start states;
+8. admissibility of lane changes on the main generator: share of decision ticks with LANE_LEFT or
+   LANE_RIGHT in A_safe over the (D, rho) grid for both adjacent-lane models (fixed policy IDLE,
+   otherwise SLOWER), with the blocking reasons.
 H1-H3 are not tested by the pilot.
 
     python -m experiments.pilot --out runs/pilot_ci        (CI)
@@ -35,9 +38,10 @@ import numpy as np  # noqa: E402
 from experiments.dqn import DQN  # noqa: E402
 from experiments.env import FAST_ROAD, THREAD_VARS, make_env, reset_cached  # noqa: E402
 from experiments.generator import I_BRAKE, I_LANE, I_SPEED, N_KIN, QUEUE_CODES, RHOS  # noqa: E402
-from experiments.runner import JERK_JUMP, NAMES, mask_str, run_episode  # noqa: E402
-from rss_shield.params import LANE_WIDTH, WIDTH  # noqa: E402
+from experiments.runner import JERK_JUMP, LANE_CHANGES, NAMES, mask_str, run_episode  # noqa: E402
+from rss_shield.params import ACTION_INDEX, LANE_WIDTH, WIDTH  # noqa: E402
 from rss_shield.rss import d_min_lat  # noqa: E402
+from rss_shield.shield import RSSShield, ShieldConfig  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 GAMMA = 0.99
@@ -50,6 +54,8 @@ SEEDS = {
     "diag": list(range(900_092, 900_095)),      # rho = 0.6 vs 1.0 diagnostic
 }
 QUICK_SEEDS = {"warmup": 3, "start10": 2, "start25": 2, "train": 50, "eval": 1, "diag": 1}
+LC_GRID_STEPS = 60          # decision steps per start state in the lane-change grid (review of PR #4)
+LC_PREF = {"LANE_LEFT": 0.0, "IDLE": 1.0, "LANE_RIGHT": 0.0, "FASTER": 0.0, "SLOWER": 0.5}
 
 
 # ---------------------------------------------------------------------- formatting
@@ -305,13 +311,60 @@ def diagnostic(args, seeds, cache):
     return out
 
 
+def lane_change_grid(seeds_by_D, cache, n_steps=LC_GRID_STEPS, models=("occupancy", "observed")):
+    """Admissibility of lane changes on the main generator (review of PR #4, item 3): share of
+    decision ticks with LANE_LEFT or LANE_RIGHT in A_safe over the (D, rho) grid. Fixed policy
+    IDLE, otherwise SLOWER (LC_PREF, not trained); the same cached start states for every rho and
+    adjacent-lane model; at most n_steps decision steps per start state. Blocks of each lane
+    change are split by reason: front / rear (RSS violation with a vehicle ahead / behind; one
+    block can have both), busy (maneuver in progress or queued), no_lane (no lane that way)."""
+    out = []
+    for D, seeds in seeds_by_D.items():
+        env = make_env(D=D)
+        for model in models:
+            for rho in RHOS:
+                g = dict(D=D, model=model, rho=rho, episodes=len(seeds), ticks=0, left=0, right=0,
+                         any=0, front=0, rear=0, busy=0, no_lane=0, intercept=0)
+                for s in seeds:
+                    reset_cached(env, s, cache)
+                    shield = RSSShield(env.vehicle, ShieldConfig(rho=rho, adjacent_lane_model=model))
+                    for _ in range(n_steps):
+                        dec = shield.decide("IDLE", LC_PREF)
+                        ok = {n: bool(dec.mask[ACTION_INDEX[n]]) for n in LANE_CHANGES}
+                        g["ticks"] += 1
+                        g["left"] += int(ok["LANE_LEFT"])
+                        g["right"] += int(ok["LANE_RIGHT"])
+                        g["any"] += int(ok["LANE_LEFT"] or ok["LANE_RIGHT"])
+                        g["intercept"] += int(dec.intervention)
+                        for n in LANE_CHANGES:
+                            if ok[n]:
+                                continue
+                            why = dec.violations.get(n) or {}
+                            if why.get("busy"):
+                                g["busy"] += 1
+                            elif why.get("no_lane"):
+                                g["no_lane"] += 1
+                            else:
+                                g["front"] += int("front" in why)
+                                g["rear"] += int("rear" in why)
+                        _, _, term, trunc, _ = env.step(dec.command)
+                        if term or trunc:
+                            break
+                g["share"] = g["any"] / g["ticks"] if g["ticks"] else None
+                out.append(g)
+    return out
+
+
 def totals(stats):
     def s(k):
         return sum(c[k] for c in stats)
     steps = s("steps")
+    n_rss = s("N_att") - s("N_busy") - s("N_no_lane")
     return dict(episodes=len(stats), steps=steps, E=s("E"), intercept=s("intercept"),
                 takeover=s("takeover"), abort=s("abort"), fallback=s("fallback"), N_att=s("N_att"),
                 N_blocked=s("N_blocked"), BLCR=(s("N_blocked") / s("N_att") if s("N_att") else None),
+                N_busy=s("N_busy"), N_no_lane=s("N_no_lane"),
+                BLCR_rss=((s("N_blocked") - s("N_busy") - s("N_no_lane")) / n_rss if n_rss else None),
                 N_att_int=s("N_att_int"), N_exec=s("N_exec"), N_exec_int=s("N_exec_int"),
                 masked=s("masked"), R_int=(s("masked") + s("intercept")) / steps,
                 crashes=s("crashed"), CR=s("crashed") / len(stats), completed=s("completed"),
@@ -322,7 +375,8 @@ def totals(stats):
 # ---------------------------------------------------------------------- report
 COUNTER_COLS = [("steps", "шагов"), ("E", "E"), ("intercept", "перехват"), ("takeover", "TAKEOVER"),
                 ("abort", "ABORT"), ("fallback", "FALLBACK"), ("N_att", "N_att"), ("N_blocked", "N_blocked"),
-                ("BLCR", "BLCR"), ("N_att_int", "N_att_int"), ("N_exec", "N_exec"),
+                ("BLCR", "BLCR"), ("N_busy", "N_busy"), ("N_no_lane", "N_no_lane"), ("BLCR_rss", "BLCR_rss"),
+                ("N_att_int", "N_att_int"), ("N_exec", "N_exec"),
                 ("N_exec_int", "N_exec_int"), ("masked", "замена aπ"), ("R_int", "R_int"),
                 ("crashed", "столкновение"), ("completed", "до T_max"), ("dx", "Δx, м"),
                 ("v_eff", "v_eff, м/с"), ("jerk_rms", "JerkRMS")]
@@ -397,7 +451,8 @@ def report(args, R):
                           for k, _ in COUNTER_COLS])
     a(table(["сид"] + [h for _, h in COUNTER_COLS], rows))
     a("")
-    a("Итого: BLCR = ΣN_blocked / ΣN_att, R_int = (Σзамен + Σшагов перехвата) / Σшагов, "
+    a("Итого: BLCR = ΣN_blocked / ΣN_att; BLCR_rss — то же без блокировок busy (манёвр в процессе "
+      "или в очереди) и «нет полосы»; R_int = (Σзамен + Σшагов перехвата) / Σшагов, "
       "v_eff и JerkRMS — средние по эпизодам. Журнал шагов: `eval_journal.csv`; фрагмент первого "
       "эпизода (первые шаги и все шаги перехвата):")
     a("")
@@ -444,6 +499,24 @@ def report(args, R):
             [[d["seed"], d["rho"], d["steps"], d["intercept"], d["share"], d["empty"], d["masked"],
               d["crashed"], d["unsafe"], d["unsafe_lane"]] for d in R["diag"]]))
     a("")
+    G = R.get("lc_grid") or []
+    if G:
+        a("## 8. Допустимость смены полосы на основном генераторе (сетка D × ρ)")
+        a("")
+        a(f"Фиксированная политика «IDLE, иначе SLOWER» (не обучается), до {R['lc_grid_steps']} шагов "
+          "решения на старт; старты из кэша start_states, одни и те же для всех ρ и обеих моделей "
+          "соседней полосы. Доля — такты, на которых LANE_LEFT или LANE_RIGHT входит в A_safe. "
+          "Причины блокировки считаются по каждому из двух действий: front / rear — нарушение RSS "
+          "с ТС впереди / сзади (у одной блокировки могут быть обе), busy — манёвр в процессе или "
+          "в очереди, нет полосы — смена полосы за край дороги.")
+        a("")
+        a(table(["D", "модель соседней полосы", "ρ, с", "стартов", "тактов", "LANE_LEFT доп.",
+                 "LANE_RIGHT доп.", "доля тактов со сменой полосы", "front", "rear", "busy",
+                 "нет полосы", "шагов перехвата"],
+                [[g["D"], g["model"], str(g["rho"]), g["episodes"], g["ticks"], g["left"], g["right"],
+                  g["share"], g["front"], g["rear"], g["busy"], g["no_lane"], g["intercept"]]
+                 for g in G]))
+        a("")
     a("## Время")
     a("")
     tm = R["timing"]
@@ -486,7 +559,7 @@ def main(argv=None):
     R, phases = {}, {}
 
     t0 = time.perf_counter()
-    log("[1/7] start states and warm-up check")
+    log("[1/8] start states and warm-up check")
     infos = {40: start_states(40, seeds["warmup"], cache), 10: start_states(10, seeds["start10"], cache),
              25: start_states(25, seeds["start25"], cache)}
     R["warmup"] = warmup_check(infos[40])
@@ -503,7 +576,7 @@ def main(argv=None):
     phases["стартовые состояния и прогрев"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    log("[2/7] training")
+    log("[2/8] training")
     agent, steps_log, episodes, t_train = train(args, seeds["train"], cache, log)
     write_csv(out / "train_episodes.csv", episodes)
     tot = totals(episodes)
@@ -518,17 +591,17 @@ def main(argv=None):
                   learn_ms=1e3 * sum(c["t_learn"] for c in episodes) / n_steps)
     phases["обучение"] = time.perf_counter() - t0
 
-    log("[3/7] replay records")
+    log("[3/8] replay records")
     rows, R["check"] = check_transitions(agent, steps_log)
     R["first_multi"], R["records"] = records_section(agent, rows)
     log("  check: " + to_json(R["check"]))
 
-    log("[4/7] save / load")
+    log("[4/8] save / load")
     loaded, R["saveload"] = save_load(agent, out)
     log("  " + to_json(R["saveload"]))
 
     t0 = time.perf_counter()
-    log("[5/7] evaluation of the loaded model")
+    log("[5/8] evaluation of the loaded model")
     R["journal"], R["eval"] = evaluate(loaded, args, seeds["eval"], cache)
     R["eval_total"] = totals(R["eval"])
     write_csv(out / "eval_journal.csv", R["journal"])
@@ -536,13 +609,22 @@ def main(argv=None):
     phases["оценка"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    log("[6/7] adjacent-lane diagnostic (rho = 0.6 vs 1.0)")
+    log("[6/8] adjacent-lane diagnostic (rho = 0.6 vs 1.0)")
     R["diag"] = diagnostic(args, seeds["diag"], cache)
     for d in R["diag"]:
         log("  " + to_json(d).replace("\n", ""))
     phases["диагностика ρ"] = time.perf_counter() - t0
 
-    log("[7/7] report")
+    t0 = time.perf_counter()
+    log("[7/8] lane-change admissibility over the (D, rho) grid")
+    R["lc_grid_steps"] = 20 if args.quick else LC_GRID_STEPS
+    R["lc_grid"] = lane_change_grid({10: seeds["start10"][:3], 25: seeds["start25"][:3],
+                                     40: seeds["warmup"][:3]}, cache, R["lc_grid_steps"])
+    for g in R["lc_grid"]:
+        log("  " + to_json(g).replace("\n", ""))
+    phases["допустимость смены полосы"] = time.perf_counter() - t0
+
+    log("[8/8] report")
     timing["phases"] = phases
     R["timing"] = timing
     (out / "report.md").write_text(report(args, R), encoding="utf-8")

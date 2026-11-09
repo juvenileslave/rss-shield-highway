@@ -121,7 +121,8 @@ class ProtocolObservation(KinematicObservation):
       [83]    brake_mode: the forced braking limiter of TAKEOVER / FALLBACK is on;
       [84]    target_speed index / (number of levels - 1);
       [85]    target_lane_index - lane_index (-1, 0, +1).
-    mode_a=True: Mode A mapping, supervisory codes replaced by policy actions and [83] = 0."""
+    mode_a=True: Mode A mapping, supervisory codes replaced by policy actions and [83] = 0.
+    A Kinematics part of a wrong shape raises ValueError instead of silent zeros."""
 
     def __init__(self, env, mode_a=False, **kwargs):
         super().__init__(env, **kwargs)
@@ -143,9 +144,13 @@ class ProtocolObservation(KinematicObservation):
         return x
 
     def observe(self):
-        kin = np.asarray(super().observe(), dtype=np.float32)
-        if kin.shape != (self.vehicles_count, len(self.features)):
+        if not self.env.road:                     # no scene yet: zeros, as in KinematicObservation
             return np.zeros(N_OBS, dtype=np.float32)
+        kin = np.asarray(super().observe(), dtype=np.float32)
+        expected = (self.vehicles_count, len(self.features))
+        if kin.shape != expected:
+            raise ValueError(f"Kinematics part of the observation has shape {kin.shape}, expected "
+                             f"{expected}: the {N_OBS}-feature observation cannot be built")
         return np.concatenate([kin.reshape(-1), self.extras()])
 
 

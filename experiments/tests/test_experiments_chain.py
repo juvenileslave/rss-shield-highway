@@ -216,6 +216,7 @@ def test_runner_counters_and_semi_mdp_records():
         assert c["E"] + c["intercept"] == c["steps"]
         assert c["takeover"] + c["abort"] + c["fallback"] == c["intercept"]
         assert c["N_blocked"] <= c["N_att"] <= c["E"]
+        assert c["N_busy"] + c["N_no_lane"] <= c["N_blocked"]
         assert c["N_exec_int"] <= c["N_exec"]
         assert c["steps"] <= 50
     rows = {(r["episode"], r["k"]): r for r in log}

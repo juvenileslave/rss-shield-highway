@@ -3,10 +3,17 @@ semi-MDP transitions (7.2) and per-episode counters (7.7).
 
 Accounting (protocol 7.7):
   policy step      A_safe(s_k) is not empty; the executed command is a policy action;
-  intercept step   A_safe(s_k) is empty; the shield issues TAKEOVER, ABORT or FALLBACK;
+  intercept step   A_safe(s_k) is empty; the shield issues TAKEOVER, ABORT or FALLBACK. The type of
+                   a step is set by its decision tick (who issued the command at s_k), not by the
+                   command active during the step: a tick at which the policy decides while an
+                   ABORT is still active is a policy step and belongs to E;
   E                number of policy steps (exposure);
   N_att, N_blocked policy steps whose unmasked greedy action a_pi is a lane change, and those of
                    them with a_pi outside A_safe; BLCR = N_blocked / N_att, both counted on E;
+  N_busy           of N_blocked: lane changes masked because a maneuver is in progress or waiting
+                   in the FIFO (not an RSS block); N_no_lane - masked because there is no lane in
+                   that direction; BLCR_rss = (N_blocked - N_busy - N_no_lane) /
+                   (N_att - N_busy - N_no_lane) counts RSS blocks only;
   N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR);
   N_exec           lane markings crossed by the ego (lane_index changed during a step);
   N_exec_int       of them, crossings while a supervisory command is active (maneuver completed
@@ -89,7 +96,8 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     shield = RSSShield(ego, ShieldConfig(rho=rho)) if shield_on else None
     asm = TransitionAssembler(agent.cfg["gamma"], agent.buffer.add) if train else None
     c = dict(steps=0, E=0, intercept=0, takeover=0, abort=0, fallback=0, N_att=0, N_blocked=0,
-             N_att_int=0, N_exec=0, N_exec_int=0, masked=0, ret=0.0, ttc_events=0, crashed=False,
+             N_busy=0, N_no_lane=0, N_att_int=0, N_exec=0, N_exec_int=0, masked=0, ret=0.0,
+             ttc_events=0, crashed=False,
              crash_intercept=False, crash_sup_active=False,
              t_policy=0.0, t_shield=0.0, t_env=0.0, t_learn=0.0)
     x0, lane_prev = float(ego.position[0]), ego.lane_index[2]
@@ -113,7 +121,12 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
             c["E"] += 1
             if a_pi in LANE_CHANGES:
                 c["N_att"] += 1
-                c["N_blocked"] += int(not mask[ACTION_INDEX[a_pi]])
+                blocked = not mask[ACTION_INDEX[a_pi]]
+                c["N_blocked"] += int(blocked)
+                if blocked and shield is not None:
+                    why = dec.violations.get(a_pi) or {}
+                    c["N_busy"] += int(bool(why.get("busy")))
+                    c["N_no_lane"] += int(bool(why.get("no_lane")))
             c["masked"] += int(cmd != a_pi)
             if asm is not None:
                 asm.policy_step(obs, mask, ACTION_INDEX[cmd], meta=(episode, k))
@@ -177,6 +190,8 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     c["dx"] = float(ego.position[0] - x0)
     c["v_eff"] = c["dx"] / float(env.config["duration"])
     c["BLCR"] = c["N_blocked"] / c["N_att"] if c["N_att"] else None
+    n_rss = c["N_att"] - c["N_busy"] - c["N_no_lane"]
+    c["BLCR_rss"] = (c["N_blocked"] - c["N_busy"] - c["N_no_lane"]) / n_rss if n_rss else None
     c["R_int"] = (c["masked"] + c["intercept"]) / c["steps"] if c["steps"] else 0.0
     c["completed"] = bool(trunc and not term)
     c["abort_ignored"] = int(ego.abort_ignored)

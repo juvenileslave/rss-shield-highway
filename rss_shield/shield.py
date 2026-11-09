@@ -60,7 +60,10 @@ with a non-empty safe set.
 Decision.intervention (TAKEOVER, ABORT, FALLBACK) marks a supervisory decision (intercept
 step, excluded from the exposure E); Decision.brake marks the commands that switch the vehicle
 to forced braking (TAKEOVER, FALLBACK). ABORT is an intervention without forced braking.
+Decision.takeover is a deprecated alias of Decision.intervention (DeprecationWarning on access);
+it is not the forced braking of the vehicle (brake_mode).
 """
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
@@ -121,7 +124,6 @@ class Decision:
     a_pi: object
     a_exec: object
     mask: np.ndarray
-    takeover: bool = False        # legacy name: True for every supervisory decision
     fallback: bool = False
     reason: str = ""
     violations: dict = field(default_factory=dict)
@@ -135,6 +137,15 @@ class Decision:
     def brake(self):
         """Command switches the vehicle to forced braking [-A_MAX_BRAKE, -A_MIN_BRAKE]."""
         return self.command in (TAKEOVER, FALLBACK)
+
+    @property
+    def takeover(self):
+        """Deprecated alias of `intervention`: True for TAKEOVER, ABORT and FALLBACK, not only for
+        the forced braking of TAKEOVER. Use `intervention` (intercept step) or `brake` (forced
+        braking, brake_mode of the vehicle)."""
+        warnings.warn("Decision.takeover is deprecated: use Decision.intervention (supervisory "
+                      "decision) or Decision.brake (forced braking)", DeprecationWarning, stacklevel=2)
+        return self.intervention
 
 
 class _NeighbourPrediction:
@@ -378,14 +389,14 @@ class RSSShield:
                     v = self.check_plan([ABORT], lc_frames, {origin})
                     info["ABORT"] = v
                     if not v:
-                        return Decision(ABORT, a_pi, None, m, takeover=True, reason="return",
+                        return Decision(ABORT, a_pi, None, m, reason="return",
                                         violations=info)
             v = self.check_plan([TAKEOVER], lc_frames, {target})
             info["COMPLETE_BRAKE"] = v
             if not v:
-                return Decision(TAKEOVER, a_pi, None, m, takeover=True, reason="complete",
+                return Decision(TAKEOVER, a_pi, None, m, reason="complete",
                                 violations=info)
-            return Decision(FALLBACK, a_pi, None, m, takeover=True, fallback=True,
+            return Decision(FALLBACK, a_pi, None, m, fallback=True,
                             reason="fallback", violations=info)
-        return Decision(TAKEOVER, a_pi, None, m, takeover=True, reason="empty_safe_set",
+        return Decision(TAKEOVER, a_pi, None, m, reason="empty_safe_set",
                         violations=info)
