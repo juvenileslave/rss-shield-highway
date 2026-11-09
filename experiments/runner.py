@@ -12,29 +12,35 @@ Accounting (protocol 7.7):
                    them with a_pi outside A_safe; BLCR = N_blocked / N_att, both counted on E;
   N_busy           of N_blocked: lane changes masked because a maneuver is in progress or waiting
                    in the FIFO (not an RSS block); N_no_lane - masked because there is no lane in
-                   that direction; BLCR_rss = (N_blocked - N_busy - N_no_lane) /
-                   (N_att - N_busy - N_no_lane) counts RSS blocks only;
+                   that direction; N_att_rss = N_att - N_busy - N_no_lane and
+                   N_blocked_rss = N_blocked - N_busy - N_no_lane are the RSS attempts / blocks
+                   used by the models of H3 and BLCR_rss = N_blocked_rss / N_att_rss;
   N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR);
-  N_exec           lane markings crossed by the ego (lane_index changed during a step). Each
-                   crossing is attributed to the policy step at which its maneuver started:
-                   supervisory commands never start a lane change (TAKEOVER keeps the lateral
-                   target of the maneuver already started, ABORT is offered only before the
-                   marking is crossed, FALLBACK holds the lane containing the ego centre), so
-                   every crossing belongs to a LANE_LEFT / LANE_RIGHT executed at a policy step
-                   and N_exec is counted on the same exposure E as N_att;
-  N_exec_int       of them, crossings that physically occur while a supervisory command is active
-                   (maneuver completed under TAKEOVER / FALLBACK); reported separately, they
-                   remain in N_exec;
+  N_exec           executed lane changes, counted by the step that started the maneuver: a crossing
+                   of a lane marking (lane_index changed) is attributed to the policy step that
+                   issued that lane-change command (journal column exec_from), so every counted
+                   lane change belongs to the exposure E even if the crossing itself happens on an
+                   intercept step (offset log E of the N_exec model is consistent);
+  N_exec_int       of them, crossings while a supervisory command is active (maneuver completed
+                   under TAKEOVER / FALLBACK); they remain in N_exec;
+  N_exec_other     crossings without a policy-issued lane-change command (expected 0, checked);
   masked           policy steps where the executed command differs from a_pi;
-  R_int            (masked + intercept steps) / all steps.
+  R_int            (masked + intercept steps) / all steps;
+  ttc_pen, col_pen sums of the TTC and collision penalties of R_RS over the episode (0 for R_v);
+  crash_rear       descriptive: the ego was hit from behind (the nearest other crashed vehicle is
+                   behind the ego and overlaps it laterally); not the operational classification;
+  jerk_*           JerkRMS over physics frames; jerk_jumps - frames with |da|/dt > 50 m/s^3,
+                   jerk_jump_share - their share of the sum of squared jerk, jerk_rms_smooth -
+                   JerkRMS without them (informativeness of JerkRMS, pilot section 6).
+The shield runs with MAIN_SERIES (rss_shield.shield) unless shield_cfg is given.
 """
 import time
 
 import numpy as np
 
-from rss_shield.params import (ABORT, ACTION_INDEX, ACTIONS, DT, DT_DECISION, FALLBACK, SUPERVISORY,
-                               TAKEOVER)
-from rss_shield.shield import RSSShield, ShieldConfig
+from rss_shield.params import (ABORT, ACTION_INDEX, ACTIONS, DT, DT_DECISION, FALLBACK, LENGTH,
+                               SUPERVISORY, TAKEOVER, WIDTH)
+from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig
 from experiments.generator import queued_command
 from experiments.rewards import step_reward
 
@@ -90,24 +96,41 @@ class TransitionAssembler:
         self.open = None
 
 
+def rear_contact(ego, road):
+    """Descriptive crash attribution: the nearest other crashed vehicle that overlaps the ego
+    laterally is behind it (the ego was hit from behind)."""
+    xe, ye = float(ego.position[0]), float(ego.position[1])
+    hit = [v for v in road.vehicles if v is not ego and v.crashed
+           and abs(float(v.position[1]) - ye) < WIDTH and abs(float(v.position[0]) - xe) < 2 * LENGTH]
+    if not hit:
+        return False
+    other = min(hit, key=lambda v: abs(float(v.position[0]) - xe))
+    return bool(float(other.position[0]) < xe)
+
+
 def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=False, explore=False,
-                seed=None, reset=None, episode=0, journal=None, steps_log=None):
+                seed=None, reset=None, episode=0, journal=None, steps_log=None, shield_cfg=None):
     """One episode. agent: object with q_values(obs), rng, epsilon() (a DQN for training).
     shield_on=False: Baseline (no filter, every step is a policy step with the full action set).
     explore: epsilon-greedy over A_safe - a random preference vector is passed to the shield, so the
     executed action is uniform over A_safe; a_pi for the counters stays the greedy action.
     reset: optional callable returning (obs, info), e.g. the start-state cache; else reset(seed).
-    journal / steps_log: lists that receive one row per decision step."""
+    journal / steps_log: lists that receive one row per decision step.
+    shield_cfg: ShieldConfig keyword arguments besides rho (default MAIN_SERIES)."""
     obs, _ = reset() if reset is not None else env.reset(seed=seed)
     ego = env.vehicle
-    shield = RSSShield(ego, ShieldConfig(rho=rho)) if shield_on else None
+    cfg = dict(MAIN_SERIES if shield_cfg is None else shield_cfg)
+    shield = RSSShield(ego, ShieldConfig(rho=rho, **cfg)) if shield_on else None
+    n_lanes = int(env.config.get("lanes_count", 4))
     asm = TransitionAssembler(agent.cfg["gamma"], agent.buffer.add) if train else None
     c = dict(steps=0, E=0, intercept=0, takeover=0, abort=0, fallback=0, N_att=0, N_blocked=0,
-             N_busy=0, N_no_lane=0, N_att_int=0, N_exec=0, N_exec_int=0, masked=0, ret=0.0,
-             ttc_events=0, crashed=False,
-             crash_intercept=False, crash_sup_active=False,
+             N_busy=0, N_no_lane=0, N_att_int=0, N_exec=0, N_exec_int=0, N_exec_other=0,
+             masked=0, ret=0.0,
+             ttc_events=0, ttc_pen=0.0, col_pen=0.0, crashed=False,
+             crash_intercept=False, crash_sup_active=False, crash_rear=False,
              t_policy=0.0, t_shield=0.0, t_env=0.0, t_learn=0.0)
     x0, lane_prev = float(ego.position[0]), ego.lane_index[2]
+    pending_lc = []                 # decision steps of policy-issued lane changes not crossed yet
     del ego.acc_log[:]
     k, term, trunc = 0, False, False
     while not (term or trunc):
@@ -135,30 +158,44 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
                     c["N_busy"] += int(bool(why.get("busy")))
                     c["N_no_lane"] += int(bool(why.get("no_lane")))
             c["masked"] += int(cmd != a_pi)
+            if cmd in LANE_CHANGES:
+                lane_to = ego.lane_index[2] + (-1 if cmd == "LANE_LEFT" else 1)
+                if 0 <= lane_to < n_lanes:
+                    pending_lc.append(k)
             if asm is not None:
                 asm.policy_step(obs, mask, ACTION_INDEX[cmd], meta=(episode, k))
         else:
             c["intercept"] += 1
             c[SUP_KEY[cmd]] += 1
             c["N_att_int"] += int(a_pi in LANE_CHANGES)
+            if cmd == ABORT and pending_lc:
+                pending_lc.pop()            # the maneuver is cancelled before the crossing
         queued = queued_command(ego)
         obs2, _, term, trunc, _ = env.step(cmd)
         t3 = time.perf_counter()
         r, parts = step_reward(reward_kind, ego, env.road)
         c["ret"] += r
         c["ttc_events"] += int(parts.get("ttc_pen", 0.0) > 0)
+        c["ttc_pen"] += float(parts.get("ttc_pen", 0.0))
+        c["col_pen"] += float(parts.get("col_pen", 0.0))
         if asm is not None:
             asm.reward(r)
         lane_now = ego.lane_index[2]
         crossed = lane_now != lane_prev
+        exec_from = ""
         if crossed:
-            c["N_exec"] += 1
-            c["N_exec_int"] += int(ego.sup_active)
+            if pending_lc:
+                exec_from = pending_lc.pop(0)
+                c["N_exec"] += 1
+                c["N_exec_int"] += int(ego.sup_active)
+            else:
+                c["N_exec_other"] += 1
         lane_prev = lane_now
         if term and ego.crashed:
             c["crashed"] = True
             c["crash_intercept"] = not policy
             c["crash_sup_active"] = bool(ego.sup_active)
+            c["crash_rear"] = rear_contact(ego, env.road)
         row = dict(episode=episode, k=k, t=round(k * DT_DECISION, 1), a_pi=a_pi, command=cmd,
                    policy_step=int(policy), intervention=int(not policy), reason=reason,
                    mask=mask_str(mask), queued=queued or "", active=ego.active_cmd or "",
@@ -166,6 +203,7 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
                    return_active=int(ego.return_active), fallback=int(bool(ego.fallback)),
                    abort_ignored=int(ego.abort_ignored), lane=int(lane_now),
                    target_lane=int(ego.target_lane_index[2]), crossed=int(crossed),
+                   exec_from=exec_from,
                    x=round(float(ego.position[0]), 3), v=round(float(ego.speed), 3), r=r,
                    crashed=int(ego.crashed))
         if steps_log is not None:
@@ -193,12 +231,20 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     a = np.asarray(ego.acc_log, dtype=float)
     c["jerk_rms"] = float(np.sqrt(np.mean((np.diff(a) / DT) ** 2))) if a.size > 1 else 0.0
     c["jerk_jumps"] = int(np.sum(np.abs(np.diff(a)) / DT > JERK_JUMP)) if a.size > 1 else 0
+    if a.size > 1:
+        j2 = (np.diff(a) / DT) ** 2
+        jump = np.sqrt(j2) > JERK_JUMP
+        c["jerk_jump_share"] = float(j2[jump].sum() / j2.sum()) if j2.sum() > 0 else 0.0
+        c["jerk_rms_smooth"] = float(np.sqrt(np.mean(j2[~jump]))) if (~jump).any() else 0.0
+    else:
+        c["jerk_jump_share"], c["jerk_rms_smooth"] = 0.0, 0.0
     c["frames"] = int(a.size)
     c["dx"] = float(ego.position[0] - x0)
     c["v_eff"] = c["dx"] / float(env.config["duration"])
     c["BLCR"] = c["N_blocked"] / c["N_att"] if c["N_att"] else None
-    n_rss = c["N_att"] - c["N_busy"] - c["N_no_lane"]
-    c["BLCR_rss"] = (c["N_blocked"] - c["N_busy"] - c["N_no_lane"]) / n_rss if n_rss else None
+    c["N_att_rss"] = c["N_att"] - c["N_busy"] - c["N_no_lane"]
+    c["N_blocked_rss"] = c["N_blocked"] - c["N_busy"] - c["N_no_lane"]
+    c["BLCR_rss"] = c["N_blocked_rss"] / c["N_att_rss"] if c["N_att_rss"] else None
     c["R_int"] = (c["masked"] + c["intercept"]) / c["steps"] if c["steps"] else 0.0
     c["completed"] = bool(trunc and not term)
     c["abort_ignored"] = int(ego.abort_ignored)

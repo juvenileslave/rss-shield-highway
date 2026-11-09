@@ -7,11 +7,11 @@ end of the frame. Decision ticks are frames with k % 2 == 0 (t_k = 0.0, 0.2, ...
 Status columns (protocol 7.5): supervisory intervention, active command and forced
 braking are logged separately.
   policy_step   - 1 on both frames of a decision interval whose command came from the policy
-                  (after the mask): policy step, part of the exposure E;
+                  (after the mask): a policy step, part of the exposure E;
   intervention  - 1 on both frames of a decision interval governed by a supervisory decision
-                  (TAKEOVER / ABORT / FALLBACK): intercept step, not part of the exposure E.
-                  Both flags are set by the decision tick of the interval (both 0 if no command
-                  was issued at that tick);
+                  (TAKEOVER / ABORT / FALLBACK): intercept step, not part of the exposure E;
+                  both flags are set per decision interval (by the decision tick), so
+                  policy_step + intervention = 1 on every frame of an interval with a command;
   sup_cmd       - that supervisory command ("" otherwise);
   active_cmd    - command that left the FIFO last (acts now); active_sup - it is supervisory;
   brake_mode    - forced braking limiter [-8, -4] is on (TAKEOVER / FALLBACK active);
@@ -24,6 +24,7 @@ from highway_env.road.road import Road, RoadNetwork
 
 from .params import DT, FRAMES_PER_DECISION, LENGTH, WIDTH, ACTION_INDEX, SUPERVISORY
 from .rss import d_min_long, d_min_lat
+from .shield import lateral_danger
 from .vehicle import DelayedRSSVehicle, ScriptedVehicle
 
 
@@ -59,7 +60,9 @@ def add_scripted(road, lane_id, x, v, name, accel=None, lane_change=None, rss_fo
 
 
 def _danger(ego, others, rho):
-    """Actual RSS quantities at the end of a frame (nearest front / rear / lateral)."""
+    """Actual RSS quantities at the end of a frame (nearest front / rear / lateral). danger: both
+    thresholds violated, the lateral one with the operational condition of protocol 7.7
+    (lateral overlap or lateral approach, shield.lateral_danger)."""
     out = dict(gap_front=np.nan, d_min_long_front=np.nan, gap_rear=np.nan,
                d_min_long_rear=np.nan, side_min=np.nan, d_min_lat_min=np.nan,
                danger=False, danger_with="")
@@ -83,7 +86,8 @@ def _danger(ego, others, rho):
             best_r = (gap, need)
         if abs(dx) < 50 and (best_s is None or side < best_s[0]):
             best_s = (side, dlat)
-        if gap < need and side < dlat:
+        # lateral part as in the filter and t_danger (protocol 7.7): overlap or lateral approach
+        if gap < need and side < dlat and lateral_danger(side, (vye - vyo) * sgn):
             out["danger"] = True
             out["danger_with"] += getattr(o, "name", "?") + ("F" if dx >= 0 else "R") + ";"
     if best_f:

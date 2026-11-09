@@ -109,7 +109,7 @@ def scenario2a(rho=0.4, T=3.0):
 
 
 def scenario2b(variant="i", rho=0.4, t_b=0.2, model="observed", T=5.0, gap_n=40.0,
-               rear_margin=1.0, rear_reactive=True):
+               rear_margin=1.0, rear_reactive=True, lc_prediction="worst_case"):
     """Ego lane 1 -> lane 2 (LANE_RIGHT at tick 0) at 20 m/s. Neighbour N in lane 3, gap_n m
     ahead (bumper gap), 20 m/s; at t_b it starts a lane change into lane 2.
     variant "i":   origin lane empty -> return (ABORT) expected;
@@ -119,7 +119,9 @@ def scenario2b(variant="i", rho=0.4, t_b=0.2, model="observed", T=5.0, gap_n=40.
                    inadmissible, completion too -> FALLBACK expected. rear_reactive=True: R is an
                    RSS-compliant follower (brakes -A_MIN_BRAKE after rho when its gap < d_min);
                    False: R keeps 28 m/s (non-reacting, any contact is CR_env by the rear car).
-    model: adjacent_lane_model of the shield ("observed" / "occupancy")."""
+    model: adjacent_lane_model of the shield ("observed" / "occupancy").
+    lc_prediction: prediction of vehicles occupying the lane-change lanes ("worst_case" - the
+    verification setting of table 3; "nominal" - the main series, shield.MAIN_SERIES)."""
     road = make_road()
     ego = add_ego(road, 1, X0, 20.0, target_speed=20.0, initial_active="IDLE")
     add_scripted(road, 3, X0 + LENGTH + gap_n, 20.0, "N", lane_change=(t_b, ("0", "1", 2)))
@@ -127,9 +129,11 @@ def scenario2b(variant="i", rho=0.4, t_b=0.2, model="observed", T=5.0, gap_n=40.
         gap_r = d_min_long(28.0, 20.0, rho) + rear_margin
         add_scripted(road, 1, X0 - LENGTH - gap_r, 28.0, "R",
                      rss_follow=rho if rear_reactive else None)
-    sh = RSSShield(ego, ShieldConfig(rho=rho, adjacent_lane_model=model))
+    sh = RSSShield(ego, ShieldConfig(rho=rho, adjacent_lane_model=model,
+                                     lc_prediction=lc_prediction))
+    suffix = "" if lc_prediction == "worst_case" else f"_{lc_prediction}"
     r = Runner(road, ego, shielded(sh, lambda k, t: "LANE_RIGHT" if k == 0 else "IDLE"), rho,
-               name=f"S2b_{variant}_{model}")
+               name=f"S2b_{variant}_{model}{suffix}")
     r.run(T, stop_after_crash=0.5)
     return r
 

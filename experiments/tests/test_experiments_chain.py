@@ -217,7 +217,10 @@ def test_runner_counters_and_semi_mdp_records():
         assert c["takeover"] + c["abort"] + c["fallback"] == c["intercept"]
         assert c["N_blocked"] <= c["N_att"] <= c["E"]
         assert c["N_busy"] + c["N_no_lane"] <= c["N_blocked"]
+        assert c["N_att_rss"] == c["N_att"] - c["N_busy"] - c["N_no_lane"]
+        assert 0 <= c["N_blocked_rss"] <= c["N_att_rss"]
         assert c["N_exec_int"] <= c["N_exec"]
+        assert c["N_exec_other"] == 0        # every crossing is traced to a policy-issued command
         assert c["steps"] <= 50
     rows = {(r["episode"], r["k"]): r for r in log}
     b = agent.buffer
@@ -233,3 +236,4 @@ def test_runner_counters_and_semi_mdp_records():
         assert b.d[i] or b.m2[i].any()
     base = run_episode(env, agent, shield_on=False, reward_kind="RS", seed=13)
     assert base["E"] == base["steps"] and base["intercept"] == 0 and base["masked"] == 0
+    assert base["N_blocked"] == 0 and base["N_exec_other"] == 0

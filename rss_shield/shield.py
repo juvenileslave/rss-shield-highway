@@ -4,7 +4,15 @@ Definition of admissibility (protocol 7.2): an action a chosen at decision tick 
 active on [t_{k+1}, t_{k+2}) because of the FIFO delay; on [t_k, t_{k+1}) the already queued
 command acts. a is admissible if on every predicted physics frame of the horizon no RSS
 dangerous situation is created, i.e. there is no neighbour for which BOTH
-    longitudinal gap < d_min_long   and   lateral clearance < d_min_lat.
+    longitudinal gap < d_min_long   and   lateral clearance < d_min_lat,
+where the lateral part follows the operational definition of protocol 7.7 (the same one as
+t_danger and the start label): for a neighbour whose body overlaps the ego laterally (clearance
+< 0, e.g. the ego lane) the longitudinal threshold alone decides; for any other neighbour the
+lateral threshold counts only while the lateral clearance decreases (closing speed > V_LAT_OBS).
+Without this condition d_min_lat(0, 0, rho) > LANE_WIDTH - WIDTH = 2 m for rho > ~0.86 s and two
+vehicles driving side by side in the centres of adjacent lanes would be "dangerous" (IDLE
+forbidden next to any adjacent-lane neighbour at rho = 1.0). lateral_rule="rss" restores the
+strict RSS threshold (diagnostic only).
 Vehicles ahead are always checked; vehicles behind only in lanes the ego is entering.
 Horizon: 2 decision periods for lane keeping; 2 decision periods + LC_HORIZON for lane
 changes and while a maneuver is in progress.
@@ -41,8 +49,17 @@ Neighbour prediction model (ShieldConfig):
                                    reaction comes after tau_eff = tau + dt_decision
                                    (this is the model behind table 2 of the protocol).
                   = "worst_case" - own-lane leader brakes with -A_MAX_BRAKE on the horizon.
-  Vehicles relevant to a lane change (target lane and lanes adjacent to it) are always
-  predicted with worst-case bounds: ahead -A_MAX_BRAKE, behind +A_MAX_ACCEL (v >= 0).
+  Vehicles relevant to a lane change (in / predicted to occupy the target or return lane):
+  lc_prediction = "worst_case" - bounds on the whole horizon: ahead -A_MAX_BRAKE, behind
+                                 +A_MAX_ACCEL (v >= 0); default of ShieldConfig, the model behind
+                                 rows T2a-Q2 of table 3 (conservative control variant);
+                = "nominal"    - current speed, as the own-lane leader: braking of the vehicle
+                                 ahead and acceleration of the vehicle behind within rho are
+                                 already in d_min_long; the maneuver is re-checked at every tick
+                                 (hierarchy below). Model of the main series (MAIN_SERIES), chosen
+                                 before it: with "worst_case" +3 m/s^2 of
+                                 the follower over 2.4 s on top of d_min blocks almost every lane
+                                 change on the main generator.
   adjacent_lane_model = "occupancy" - every vehicle in a lane adjacent to the target lane is
                                       treated as occupying the target lane (v6 text, 7.4);
                       = "observed"  - only if it already moves laterally towards the target
@@ -72,7 +89,22 @@ from .params import (DT, FRAMES_PER_DECISION, A_MAX_ACCEL, A_MAX_BRAKE, ACTIONS,
                      TAKEOVER, ABORT, FALLBACK, SUPERVISORY, LENGTH, WIDTH, LANE_WIDTH, V_MAX)
 from .rss import d_min_long, d_min_lat
 
-V_LAT_OBS = 0.1   # m/s, lateral speed treated as an observed lane change
+V_LAT_OBS = 0.1   # m/s, lateral speed treated as an observed lane change / lateral approach
+
+# Configuration of the main series and of the pilot (protocol 7.4). ShieldConfig defaults are the
+# verification defaults of table 3 (scenarios set their models explicitly where needed).
+MAIN_SERIES = dict(adjacent_lane_model="observed", lc_prediction="nominal", lateral_rule="approach")
+
+
+def lateral_danger(side, closing, rule="approach"):
+    """Lateral part of an RSS dangerous situation, given side < d_min_lat (protocol 7.7).
+    side    - lateral clearance between the bodies, m (< 0: lateral overlap, e.g. the same lane);
+    closing - rate of decrease of the clearance, m/s (> 0: the vehicles approach laterally).
+    rule = "approach": overlap, or approach faster than V_LAT_OBS (operational definition shared by
+           the filter, t_danger and the start label); "rss": strict RSS, any side < d_min_lat."""
+    if rule == "rss":
+        return True
+    return side < 0.0 or closing > V_LAT_OBS
 
 
 def lc_frames_for(lc_horizon):
@@ -104,6 +136,8 @@ class ShieldConfig:
     rho: float
     long_prediction: str = "nominal"
     adjacent_lane_model: str = "occupancy"
+    lc_prediction: str = "worst_case"
+    lateral_rule: str = "approach"
     lc_horizon: float = 2.0
     # None: per-vehicle complete radius reach() (default); a number: fixed radius, m, which must
     # not be smaller than complete_zone(rho, lc_horizon) (a fixed 150 m is incomplete)
@@ -111,6 +145,12 @@ class ShieldConfig:
     eps: float = 1e-9
 
     def __post_init__(self):
+        for name, allowed in (("long_prediction", ("nominal", "worst_case")),
+                              ("adjacent_lane_model", ("occupancy", "observed")),
+                              ("lc_prediction", ("nominal", "worst_case")),
+                              ("lateral_rule", ("approach", "rss"))):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name} = {getattr(self, name)!r}, expected one of {allowed}")
         if self.zone is not None:
             need = complete_zone(self.rho, self.lc_horizon)
             if self.zone < need - 1e-9:
@@ -267,7 +307,9 @@ class RSSShield:
             lc_lanes, i.e. a lane the ego is entering (lane change target or return lane);
             in lane keeping ego is not responsible for the vehicle behind it.
         lc_lanes - lanes of the lane change / return; vehicles occupying them are predicted
-                   with worst-case bounds (ahead -A_MAX_BRAKE, behind +A_MAX_ACCEL).
+                   by cfg.lc_prediction (worst_case: ahead -A_MAX_BRAKE, behind +A_MAX_ACCEL;
+                   nominal: current speed).
+        Lateral part: lateral_danger(side, closing, cfg.lateral_rule).
         """
         cfg = self.cfg
         ego_states = self._simulate_ego(commands, n_frames)
@@ -294,7 +336,10 @@ class RSSShield:
                     occ.add(tl)
                     y_mode, y_goal = "jump", LANE_WIDTH * tl
             if occ & lc_lanes:
-                a = -A_MAX_BRAKE if ahead else A_MAX_ACCEL
+                if cfg.lc_prediction == "worst_case":
+                    a = -A_MAX_BRAKE if ahead else A_MAX_ACCEL
+                else:
+                    a = 0.0
             elif cfg.long_prediction == "worst_case" and ahead:
                 a = -A_MAX_BRAKE
             else:
@@ -317,7 +362,8 @@ class RSSShield:
                 side = abs(yo - ye) - WIDTH
                 sgn = np.sign(yo - ye) or 1.0
                 need_lat = d_min_lat(vye * sgn, vyo * sgn, cfg.rho)
-                if side < need_lat - cfg.eps:
+                closing = (vye - vyo) * sgn
+                if side < need_lat - cfg.eps and lateral_danger(side, closing, cfg.lateral_rule):
                     key = "front" if dx >= 0 else "rear"
                     viol.setdefault(key, dict(frame=n, vehicle=name, gap=round(gap, 3),
                                               d_min_long=round(need, 3), side=round(side, 3),

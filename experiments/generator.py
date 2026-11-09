@@ -21,6 +21,7 @@ from highway_env.vehicle.behavior import IDMVehicle
 from rss_shield.env import RSSHighwayEnv, RSSMetaAction
 from rss_shield.params import ABORT, DT, FALLBACK, FRAMES_PER_DECISION, LENGTH, TAKEOVER, WIDTH
 from rss_shield.rss import d_min_lat, d_min_long
+from rss_shield.shield import lateral_danger
 from rss_shield.vehicle import DelayedRSSVehicle
 
 RHOS = (0.1, 0.2, 0.4, 0.6, 1.0)           # rho grid of the main series, s
@@ -77,10 +78,12 @@ def mode_a_code(ego, cmd):
     return cmd
 
 
-def initially_unsafe(ego, road, rho, adjacent=True, eps=1e-9):
+def initially_unsafe(ego, road, rho, adjacent=True, eps=1e-9, rule="approach"):
     """Start-state label (7.6): d_min_long(rho) is violated to the leader or to the follower in the
     ego lane, or (adjacent=True) both the longitudinal and the lateral thresholds are violated for a
-    vehicle of an adjacent lane (same sign convention of d_min_lat as in the shield)."""
+    vehicle of an adjacent lane with lateral overlap or lateral approach - the same criterion as in
+    the filter and in t_danger (shield.lateral_danger, protocol 7.7; rule="rss": strict RSS, any
+    clearance below d_min_lat, diagnostic only). Same sign convention of d_min_lat as in the shield."""
     lane_e = ego.lane_index[2]
     xe, ye, ve = float(ego.position[0]), float(ego.position[1]), float(ego.speed)
     vye = ego.speed * np.sin(ego.heading)
@@ -108,8 +111,10 @@ def initially_unsafe(ego, road, rho, adjacent=True, eps=1e-9):
         if gap >= need - eps:
             continue
         sgn = np.sign(o.position[1] - ye) or 1.0
-        need_lat = d_min_lat(vye * sgn, o.speed * np.sin(o.heading) * sgn, rho)
-        if abs(o.position[1] - ye) - WIDTH < need_lat - eps:
+        vyo = o.speed * np.sin(o.heading)
+        side = abs(o.position[1] - ye) - WIDTH
+        need_lat = d_min_lat(vye * sgn, vyo * sgn, rho)
+        if side < need_lat - eps and lateral_danger(side, (vye - vyo) * sgn, rule):
             return True
     return False
 

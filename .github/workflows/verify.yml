@@ -36,7 +36,7 @@ jobs:
         run: diff expected/table3.csv results/table3.csv
 
       - name: Check pytest summary
-        run: grep -q "87 passed" results/pytest.txt
+        run: grep -q "95 passed" results/pytest.txt
 
       - name: Check sim equivalence
         run: python -m pytest -q -p no:cacheprovider sim/test_fast_road.py
