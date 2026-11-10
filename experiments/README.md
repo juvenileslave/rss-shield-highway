@@ -37,10 +37,12 @@ DQN написан на NumPy, поэтому зависимости обуче�
 ```bash
 python -m experiments.stats_pilot --out runs/pilot_run/stats
 python -m analysis.run --episodes runs/pilot_run/stats/episodes.csv --out runs/pilot_run/stats --boot 199 --boot-sens 999 --boot-diff 2000
-python -m analysis.power --starts runs/pilot_run/start_states.csv --out runs/pilot_run/stats/power.md
+python -m analysis.power --starts runs/pilot_run/start_states.csv | awk '/^# Power of H1a/{n++} n==2' > runs/pilot_run/stats/power.md
 ```
 
 Политики статистического пилота не обучаются, поэтому `analysis.md` показывает только, что каждый шаг плана вычисляется.
+`analysis.power` за один запуск печатает два отчёта подряд: для номинального плана (каждый старт корректен) и для доли
+корректных стартов пилота. В `power.md` хранится только второй; он основной, потому что опирается на стартовые состояния пилота.
 
 ## Запуск
 
