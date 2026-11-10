@@ -6,13 +6,17 @@ Q2 - the lane marking is crossed while an ABORT waits in the FIFO;
 Q3 - completeness of the neighbour zone (no fixed 150 m cut);
 Q4 - journal: supervisory intervention, active command and forced braking are separate statuses.
 """
+import dataclasses
+
 import pytest
+from highway_env.vehicle.kinematics import Vehicle
 
 import queue_reference as QR
 from rss_shield.params import DT, ABORT, TAKEOVER, FALLBACK, ACTION_INDEX, V_MAX
 from rss_shield.rss import d_min_long
 from rss_shield import scenarios as S
-from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig, complete_zone, reach
+from rss_shield.shield import (MAIN_SERIES, RSSShield, ShieldConfig, ZoneError, complete_zone,
+                               envelope_zone, reach, require_zone)
 
 LL, LR = ACTION_INDEX["LANE_LEFT"], ACTION_INDEX["LANE_RIGHT"]
 IDLE = ACTION_INDEX["IDLE"]
@@ -252,6 +256,32 @@ def test_Q3_stationary_leader_beyond_150m_is_checked():
     assert sh.decide("IDLE").command == TAKEOVER
 
 
+class FixedRadiusShield(RSSShield):
+    """Control: the neighbour zone before the fix - a fixed radius that is not validated."""
+    radius = 150.0
+
+    def _others(self, n_frames):
+        x0 = self.ego.position[0]
+        return [v for v in self.road.vehicles
+                if v is not self.ego and abs(v.position[0] - x0) <= self.radius]
+
+
+def test_Q3_control_fixed_150m_zone_admits_idle_and_300m_detects_the_leader():
+    """Control of Q3: with the zone of 150 m the standing leader (173 m, then 170 m) is discarded
+    before the prediction and IDLE stays allowed; 300 m shows 164 m against 167.625 m on the
+    first predicted frame."""
+    road, ego, sh = S.scenario_q3_far_leader(shield=FixedRadiusShield)
+    assert sh.mask()[0].sum() == 5
+    _tick(road, ego, "IDLE")
+    m1, _ = sh.mask()
+    assert m1[IDLE] == 1 and m1.sum() == 5
+    sh.radius = 300.0
+    m, info = sh.mask()
+    f = info["IDLE"]["front"]
+    assert m[IDLE] == 0 and (f["vehicle"], f["frame"]) == ("L", 1)
+    assert f["gap"] == pytest.approx(164.0) and f["d_min_long"] == pytest.approx(167.625)
+
+
 @pytest.mark.parametrize("rho", [0.1, 0.4, 1.0])
 def test_Q3b_zone_filter_equals_full_check(rho):
     dropped = 0
@@ -316,3 +346,28 @@ def test_Q4b_journal_takeover_and_fallback_statuses():
     assert rows[4]["sup_cmd"] == FALLBACK and rows[4]["intervention"] == 1
     assert rows[6]["active_cmd"] == FALLBACK and rows[6]["brake_mode"] == 1 and rows[6]["fallback"] == 1
     assert rows[5]["brake_mode"] == 0
+
+
+def test_Q3c_zone_is_a_function_of_the_scenario_envelope():
+    """V_MAX is the speed bound of highway-env; a window that truncates the zone is accepted only
+    for the declared speed envelope (main generator: ego <= 30, traffic <= 27 m/s)."""
+    assert V_MAX == Vehicle.MAX_SPEED == 40.0
+    assert envelope_zone(1.0, V_MAX, V_MAX) == (complete_zone(1.0), complete_zone(1.0))
+    ahead, behind = envelope_zone(1.0, v_ego_max=30.0, v_other_max=27.0)
+    assert ahead == pytest.approx(325.985, abs=1e-3) and behind == pytest.approx(286.76, abs=1e-3)
+    assert require_zone(700.0, 300.0, 1.0, 30.0, 27.0) == (ahead, behind)
+    with pytest.raises(ZoneError):
+        require_zone(700.0, 250.0, 1.0, 30.0, 27.0)       # too short behind
+    with pytest.raises(ZoneError):
+        require_zone(300.0, 300.0, 1.0, 30.0, 27.0)       # too short ahead
+    with pytest.raises(ZoneError):
+        require_zone(700.0, 300.0, 1.0, 30.0, 30.0)       # faster traffic needs 325.985 m behind
+
+
+def test_Q3c_zone_cannot_be_shrunk_after_validation():
+    cfg = ShieldConfig(rho=1.0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.zone = 150.0
+    with pytest.raises(ZoneError):
+        dataclasses.replace(cfg, zone=150.0)
+    assert issubclass(ZoneError, ValueError)

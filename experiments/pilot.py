@@ -53,7 +53,7 @@ import numpy as np  # noqa: E402
 from experiments.dqn import DQN  # noqa: E402
 from experiments.env import FAST_ROAD, THREAD_VARS, make_env, reset_cached  # noqa: E402
 from experiments.generator import (I_BRAKE, I_LANE, I_SPEED, N_KIN, QUEUE_CODES, RHOS,  # noqa: E402
-                                   initially_unsafe)
+                                   SPEED_SEEN, initially_unsafe, window_bounds)
 from experiments.runner import JERK_JUMP, LANE_CHANGES, NAMES, mask_str, run_episode  # noqa: E402
 from rss_shield.params import ABORT, ACTION_INDEX, LANE_WIDTH, WIDTH  # noqa: E402
 from rss_shield.rss import d_min_lat  # noqa: E402
@@ -560,6 +560,17 @@ def report(args, R):
       f"манёвра, боковое правило «перекрытие или сближение» (п. 7.3, 7.7). Сиды пилота "
       f"900 000–900 129 (900 090–900 091 и 900 095–900 099 не используются). Проверяется "
       f"работоспособность цепочки; H1–H3 пилотом не проверяются." + (" **Режим --quick.**" if args.quick else ""))
+    z = window_bounds()
+    a("")
+    a(f"Зона проверки соседей (п. 7.4). Фильтр отбирает соседей по полной зоне reach(v, N) для "
+      f"каждого автомобиля (ShieldConfig.zone = None, без фиксированного радиуса). Физически зону "
+      f"ограничивает окно трафика генератора [−{z['back']:g}; +{z['front']:g}] м — это явное "
+      f"приближение с областью применимости ρ ≤ {z['rho_max']:g} с, скорость ego ≤ {z['v_ego']:g} м/с, "
+      f"скорость остальных автомобилей ≤ {z['v_traffic']:g} м/с: при этих границах требуется "
+      f"[−{z['need_back']:.3f}; +{z['need_front']:.3f}] м. Окно проверяется при каждом reset() "
+      f"(ZoneError, если оно меньше границы), скорости — на каждом шаге (EnvelopeError); в этом "
+      f"прогоне наибольшая скорость ego {R['vmax']['ego']:.2f} м/с, остальных автомобилей "
+      f"{R['vmax']['traffic']:.2f} м/с.")
     w = R["warmup"]
     a("")
     a(f"## 1. Прогрев (п. 7.6): D = 40, {w['n']} сидов")
@@ -978,6 +989,7 @@ def main(argv=None):
     log("[10/10] report")
     timing["phases"] = phases
     R["timing"] = timing
+    R["vmax"] = dict(SPEED_SEEN)
     (out / "report.md").write_text(report(args, R), encoding="utf-8")
     summary = {k: v for k, v in R.items() if k not in ("journal", "records")}
     summary["args"] = vars(args)

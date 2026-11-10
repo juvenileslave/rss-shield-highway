@@ -1,7 +1,10 @@
 """Main traffic generator of the protocol (section 7.6) and the 86-feature observation (7.2).
 
 Window traffic: 4 lanes, D vehicles per km and lane in the window [x - 300 m, x + 700 m] around
-the anchor x (the ego after insertion). Background: IDMVehicle, DELTA ~ U(3.5, 4.5), desired speed
+the anchor x (the ego after insertion). The window is the neighbour zone the filter can see; it is
+validated against the soundness bound of protocol 7.4 for the speed envelope of the generator
+(window_bounds(): ego <= 30 m/s, traffic <= 27 m/s, rho <= 1.0 s need [-286.76; +325.985] m) on
+every reset, and the speeds are checked against the envelope on every step. Background: IDMVehicle, DELTA ~ U(3.5, 4.5), desired speed
 ~ U(23, 27) m/s, initial speed v_eq(s) + U(-1, 1). Warm-up 20 s without the ego (the anchor moves
 with the mean speed of the flow in the window), then the ego is inserted where the longitudinal RSS
 conditions at rho_max = 1.0 s hold for the leader and the follower; otherwise the nearest vehicle of
@@ -19,9 +22,10 @@ from highway_env.envs.common.observation import KinematicObservation
 from highway_env.vehicle.behavior import IDMVehicle
 
 from rss_shield.env import RSSHighwayEnv, RSSMetaAction
-from rss_shield.params import ABORT, DT, FALLBACK, FRAMES_PER_DECISION, LENGTH, TAKEOVER, WIDTH
+from rss_shield.params import (ABORT, DT, FALLBACK, FRAMES_PER_DECISION, LENGTH, TAKEOVER,
+                               TARGET_SPEEDS, WIDTH)
 from rss_shield.rss import d_min_lat, d_min_long
-from rss_shield.shield import lateral_danger
+from rss_shield.shield import lateral_danger, require_zone
 from rss_shield.vehicle import DelayedRSSVehicle
 
 RHOS = (0.1, 0.2, 0.4, 0.6, 1.0)           # rho grid of the main series, s
@@ -30,6 +34,10 @@ S_MIN = 2.0                                 # minimal bumper-to-bumper gap of th
 WINDOW_BACK, WINDOW_FRONT = 300.0, 700.0    # window [x - 300, x + 700] m around the anchor
 X0 = 1000.0                                 # initial anchor on the 10 km road, m
 DESIRED_SPEED = (23.0, 27.0)                # desired speed of the IDM vehicles, m/s
+# Scenario envelope of the main series (protocol 7.4): the traffic window truncates the neighbour
+# zone of the filter, which is sound only while the speeds stay inside these bounds.
+V_EGO_ENV = float(TARGET_SPEEDS[-1])        # largest target speed of the ego, m/s
+V_TRAFFIC_ENV = DESIRED_SPEED[1]            # largest desired speed of the IDM vehicles, m/s
 QUEUE_CODES = ("LANE_LEFT", "IDLE", "LANE_RIGHT", "FASTER", "SLOWER", TAKEOVER, ABORT, FALLBACK)
 N_VEH, N_FEAT = 15, 5
 N_KIN = N_VEH * N_FEAT                      # 75 kinematic features
@@ -37,6 +45,23 @@ N_EXTRA = len(QUEUE_CODES) + 3              # one-hot of the queue + brake flag 
 N_OBS = N_KIN + N_EXTRA                     # 86
 I_BRAKE = len(QUEUE_CODES)                  # index of the flag inside the extra features
 I_SPEED, I_LANE = I_BRAKE + 1, I_BRAKE + 2
+
+
+SPEED_SEEN = {"ego": 0.0, "traffic": 0.0}   # largest speeds seen by _check_envelope in this process
+
+
+class EnvelopeError(RuntimeError):
+    """A vehicle left the speed envelope the traffic window was validated for."""
+
+
+def window_bounds(rho_max=max(RHOS), lc_horizon=2.0):
+    """Traffic window against the soundness bound of the neighbour zone (shield.envelope_zone) for
+    rho <= rho_max, ego <= V_EGO_ENV, other vehicles <= V_TRAFFIC_ENV. Raises ZoneError if the
+    window is smaller than the bound: the zone is never trimmed silently."""
+    need_front, need_back = require_zone(WINDOW_FRONT, WINDOW_BACK, rho_max, V_EGO_ENV,
+                                         V_TRAFFIC_ENV, lc_horizon, what="traffic window")
+    return dict(front=WINDOW_FRONT, back=WINDOW_BACK, need_front=need_front, need_back=need_back,
+                rho_max=rho_max, v_ego=V_EGO_ENV, v_traffic=V_TRAFFIC_ENV)
 
 
 def idm_equilibrium_speed(s, v0=25.0, delta=4.0, d0=None, T=None):
@@ -204,6 +229,7 @@ class ProtocolHighwayEnv(RSSHighwayEnv):
             "warmup": 20.0,           # warm-up without the ego, s
             "insert_zone": 100.0,     # the insertion point is within +-100 m of the anchor
             "max_removed": 2,         # m_max
+            "rho_max": max(RHOS),     # largest rho the traffic window is validated for
             "obs_mode_a": False,
             "observation": {"type": "Kinematics", "vehicles_count": N_VEH,
                             "features": ["presence", "x", "y", "vx", "vy"], "see_behind": True,
@@ -222,8 +248,19 @@ class ProtocolHighwayEnv(RSSHighwayEnv):
     def step(self, action):
         out = super().step(action)
         if self.vehicle is not None:
+            self._check_envelope()
             self._recycle(float(self.vehicle.position[0]))
         return out
+
+    def _check_envelope(self):
+        """The window was validated for speeds inside the envelope; fail loudly outside it."""
+        ego = self.vehicle
+        v_other = max((v.speed for v in self.road.vehicles if v is not ego), default=0.0)
+        SPEED_SEEN["ego"] = max(SPEED_SEEN["ego"], float(ego.speed))
+        SPEED_SEEN["traffic"] = max(SPEED_SEEN["traffic"], float(v_other))
+        if ego.speed > V_EGO_ENV + 1e-6 or v_other > V_TRAFFIC_ENV + 1e-6:
+            raise EnvelopeError(f"speed outside the scenario envelope: ego {ego.speed:.3f} m/s "
+                                f"(<= {V_EGO_ENV}), others {v_other:.3f} m/s (<= {V_TRAFFIC_ENV})")
 
     def _is_truncated(self):
         """T_max is reached after exactly duration * policy_frequency decision steps (frame counter).
@@ -245,6 +282,7 @@ class ProtocolHighwayEnv(RSSHighwayEnv):
 
     def _create_vehicles(self):
         self.controlled_vehicles = []
+        self.zone = window_bounds(float(self.config["rho_max"]))   # ZoneError if the window is too small
         self.recycled = 0
         self.warmup_speed = []
         if getattr(self, "_constructing", False):

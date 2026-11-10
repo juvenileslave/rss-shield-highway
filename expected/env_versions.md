@@ -12,5 +12,5 @@
 | torch (для DQN) | не установлен |
 | stable-baselines3 (если используется) | не установлен |
 | git commit | нет git |
-| sha256 (rss_shield/*.py) | 0496eced404468f9 |
-| sha256 (tests/*.py) | fd0fe73c57c51a78 |
+| sha256 (rss_shield/*.py) | a52a1aa4907ccffa |
+| sha256 (tests/*.py) | 9014c437e18b965b |

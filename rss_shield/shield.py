@@ -45,8 +45,18 @@ predicted neighbour acceleration <= A_MAX_ACCEL, v >= 0):
     reach(v, N) = L + d_min_long(v + A_MAX_ACCEL*N*dt, 0, rho) + N*dt*v + A_MAX_ACCEL*dt^2*N(N-1)/2
 (dx0 - current centre distance; d_min_long grows with the rear speed and is largest for a
 standing front vehicle; the last two terms bound the distance the rear vehicle of the pair can
-gain in N frames). A fixed zone (ShieldConfig.zone) is accepted only if it is not smaller than
-reach(V_MAX, N_lc) for the longest horizon, V_MAX = highway-env Vehicle.MAX_SPEED.
+gain in N frames). The zone is therefore a function of the scenario envelope, not a constant:
+  * default (zone=None): the per-vehicle radius reach() with the actual speeds - complete for
+    every scene;
+  * a fixed zone (ShieldConfig.zone) is accepted only if it is not smaller than
+    reach(V_MAX, N_lc) for the longest horizon, V_MAX = highway-env Vehicle.MAX_SPEED
+    (complete_zone(); 472.985 m at rho = 1.0 s). A smaller value raises ZoneError; ShieldConfig is
+    frozen, so the zone cannot be shrunk after the validation;
+  * a scenario generator that keeps traffic only in a window around the ego truncates the zone
+    physically. Such a window is sound only for the declared envelope of speeds:
+    envelope_zone(rho, v_ego_max, v_other_max) gives the required extent ahead / behind and
+    require_zone() raises ZoneError if the window is smaller (experiments.generator validates
+    its window on every reset and checks the speeds on every step).
 
 Neighbour prediction model (ShieldConfig):
   long_prediction = "nominal"    - vehicles in the ego's own lane keep their current speed.
@@ -131,6 +141,27 @@ def reach(v, n, rho):
     return LENGTH + d_min_long(v + A_MAX_ACCEL * n * DT, 0.0, rho) + path_bound(v, n)
 
 
+class ZoneError(ValueError):
+    """The neighbour zone (or the traffic window that truncates it) is smaller than the bound."""
+
+
+def envelope_zone(rho, v_ego_max, v_other_max, lc_horizon=2.0):
+    """Smallest sound neighbour zone of a scenario envelope: (ahead, behind) centre distances, m,
+    for ego speeds <= v_ego_max and speeds of every other vehicle <= v_other_max."""
+    n = lc_frames_for(lc_horizon)
+    return reach(v_ego_max, n, rho), reach(v_other_max, n, rho)
+
+
+def require_zone(ahead, behind, rho, v_ego_max, v_other_max, lc_horizon=2.0, what="zone"):
+    """Raise ZoneError unless the extent (ahead, behind) covers envelope_zone(); returns the bound."""
+    need_a, need_b = envelope_zone(rho, v_ego_max, v_other_max, lc_horizon)
+    if ahead < need_a - 1e-9 or behind < need_b - 1e-9:
+        raise ZoneError(f"{what} [-{behind:g}; +{ahead:g}] m is incomplete: rho = {rho} s, ego <= "
+                        f"{v_ego_max} m/s, others <= {v_other_max} m/s need "
+                        f"[-{need_b:.3f}; +{need_a:.3f}] m")
+    return need_a, need_b
+
+
 def lanes_entered(lane_from, lane_to):
     """Lane ids entered on the way from lane_from to lane_to: every lane after lane_from up to and
     including lane_to; {lane_to} when they coincide (reversal / return into the same lane)."""
@@ -148,7 +179,7 @@ def complete_zone(rho, lc_horizon=2.0, v_max=V_MAX):
     return reach(v_max, lc_frames_for(lc_horizon), rho)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShieldConfig:
     rho: float
     long_prediction: str = "nominal"
@@ -171,8 +202,8 @@ class ShieldConfig:
         if self.zone is not None:
             need = complete_zone(self.rho, self.lc_horizon)
             if self.zone < need - 1e-9:
-                raise ValueError(f"zone = {self.zone} m is incomplete: rho = {self.rho} s and "
-                                 f"v <= {V_MAX} m/s need >= {need:.3f} m (or zone=None)")
+                raise ZoneError(f"zone = {self.zone} m is incomplete: rho = {self.rho} s and "
+                                f"v <= {V_MAX} m/s need >= {need:.3f} m (or zone=None)")
 
 
 @dataclass

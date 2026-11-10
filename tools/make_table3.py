@@ -246,6 +246,15 @@ meas["Q3"] = (f"такт 0: маска {''.join(map(str, m0))}, IDLE: кадр {
               f"{''.join(map(str, m1))}, кадр {i1['IDLE']['front']['frame']}, зазор {i1['IDLE']['front']['gap']:.3f} м; "
               f"zone = 150 м {z150} (полная зона при ρ = 1.0: {complete_zone(1.0):.3f} м); фильтр = полная проверка в "
               f"{n_eq} из {n_sc} случайных сцен, отброшено {dropped} ТС")
+from rss_shield.shield import ZoneError, envelope_zone, require_zone
+env_a, env_b = envelope_zone(1.0, 30.0, 27.0)
+try:
+    require_zone(700.0, 280.0, 1.0, 30.0, 27.0)
+    w280 = "принято"
+except ZoneError:
+    w280 = "отклонено"
+meas["Q3"] += (f"; огибающая основной серии (ego ≤ 30, трафик ≤ 27 м/с, ρ = 1.0): требуется "
+               f"[−{env_b:.3f}; +{env_a:.3f}] м, окно [−300; +700] м достаточно, окно [−280; +700] м {w280}")
 r = S.scenario2b("i", model="observed")
 r1a = S.scenario1A(0.4, "sync")
 meas["Q4"] = (f"2b-i: intervention = 1 на кадрах {[row['frame'] for row in r.rows if row['intervention']]}, "

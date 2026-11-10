@@ -211,14 +211,14 @@ def scenario_q2_scripted_abort(v=10.0, T=3.0):
     return r
 
 
-def scenario_q3_far_leader(rho=1.0, v=30.0, gap=173.0):
+def scenario_q3_far_leader(rho=1.0, v=30.0, gap=173.0, shield=RSSShield):
     """Q3: ego 30 m/s (target 30), standing leader in the ego lane, bumper gap
     173 m > d_min_long(30, 0, 1.0) = 167.625 m, i.e. beyond a fixed zone of 150 m.
     Returns (road, ego, shield) before tick 0."""
     road = make_road()
     ego = add_ego(road, 1, X0, v, target_speed=v, initial_active="IDLE")
     add_scripted(road, 1, X0 + LENGTH + gap, 0.0, "L")
-    return road, ego, RSSShield(ego, ShieldConfig(rho=rho))
+    return road, ego, shield(ego, ShieldConfig(rho=rho))
 
 
 def scenario_q3_random(seed, n=40, ticks=1):

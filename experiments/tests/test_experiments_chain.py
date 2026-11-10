@@ -4,13 +4,16 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
+from experiments import generator as G
 from experiments.env import make_env, reset_cached, start_state_path
 from experiments.dqn import DQN, backward, forward, init_mlp
 from experiments.generator import (I_BRAKE, I_SPEED, N_KIN, N_OBS, QUEUE_CODES, RHO_INSERT, RHOS,
                                    S_MIN, WINDOW_BACK, WINDOW_FRONT, idm_equilibrium_speed)
 from experiments.runner import TransitionAssembler, run_episode
 from rss_shield.params import LENGTH, TAKEOVER
+from rss_shield.shield import ZoneError
 
 SHORT = dict(warmup=2.0)          # short warm-up for unit tests (the protocol uses 20 s)
 
@@ -237,3 +240,33 @@ def test_runner_counters_and_semi_mdp_records():
     base = run_episode(env, agent, shield_on=False, reward_kind="RS", seed=13)
     assert base["E"] == base["steps"] and base["intercept"] == 0 and base["masked"] == 0
     assert base["N_blocked"] == 0 and base["N_exec_other"] == 0
+
+
+def test_traffic_window_covers_the_neighbour_zone(monkeypatch):
+    """The window [-300; +700] m is the neighbour zone of the main series: it must cover the bound
+    of protocol 7.4 for the speed envelope, and a smaller window must fail loudly."""
+    b = G.window_bounds()
+    assert (b["rho_max"], b["v_ego"], b["v_traffic"]) == (1.0, 30.0, 27.0)
+    assert b["need_back"] == pytest.approx(286.76, abs=1e-3) and b["need_back"] <= b["back"] == 300.0
+    assert b["need_front"] == pytest.approx(325.985, abs=1e-3) and b["need_front"] <= b["front"] == 700.0
+    env = _env(D=10)
+    env.reset(seed=1)
+    assert env.zone == b
+    monkeypatch.setattr(G, "WINDOW_BACK", 280.0)
+    with pytest.raises(ZoneError):
+        env.reset(seed=1)
+    monkeypatch.undo()
+    monkeypatch.setattr(G, "V_TRAFFIC_ENV", 30.0)          # faster traffic: 325.985 m behind
+    with pytest.raises(ZoneError):
+        env.reset(seed=1)
+
+
+def test_speed_outside_the_envelope_fails_loudly():
+    env = _env(D=10)
+    env.reset(seed=1)
+    for _ in range(3):
+        env.step(1)                                        # inside the envelope: no error
+    other = next(v for v in env.road.vehicles if v is not env.vehicle)
+    other.speed = 35.0
+    with pytest.raises(G.EnvelopeError):
+        env.step(1)
