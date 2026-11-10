@@ -43,7 +43,8 @@ rss_shield.accounting and used here through count_step():
   jerk_*           JerkRMS over physics frames; jerk_jumps - frames with |da|/dt > 50 m/s^3,
                    jerk_jump_share - their share of the sum of squared jerk, jerk_rms_smooth -
                    JerkRMS without them (informativeness of JerkRMS, pilot section 6).
-The shield runs with MAIN_SERIES (rss_shield.shield) unless shield_cfg is given.
+The shield runs with MAIN_SERIES (rss_shield.shield) unless shield_cfg is given; the counters
+shield_cfg / main_series record which configuration an episode really used.
 """
 import time
 
@@ -52,7 +53,7 @@ import numpy as np
 from rss_shield.accounting import (LANE_CHANGES, POLICY, block_reason, count_step,
                                    new_counters)
 from rss_shield.params import ACTION_INDEX, ACTIONS, DT, DT_DECISION, LENGTH, WIDTH
-from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig
+from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig, describe, is_main_series
 from experiments.generator import queued_command
 from experiments.rewards import step_reward
 
@@ -259,4 +260,7 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     c["unsafe_start"] = info.get("unsafe", {}).get(rho)
     c["unsafe_start_lane"] = info.get("unsafe_lane", {}).get(rho)
     c["recycled"] = getattr(env, "recycled", 0)
+    # filter configuration of the episode: main_series is None without the filter
+    c["shield_cfg"] = describe(shield.cfg) if shield is not None else "none"
+    c["main_series"] = is_main_series(shield.cfg) if shield is not None else None
     return c

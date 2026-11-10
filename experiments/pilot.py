@@ -530,7 +530,20 @@ def totals(stats):
                 jerk_rms=float(np.mean([c["jerk_rms"] for c in stats])),
                 jerk_rms_smooth=float(np.mean([c["jerk_rms_smooth"] for c in stats])),
                 jerk_jump_share=float(np.mean([c["jerk_jump_share"] for c in stats])),
-                jerk_jumps=s("jerk_jumps"), frames=s("frames"))
+                jerk_jumps=s("jerk_jumps"), frames=s("frames"),
+                shield_cfg="; ".join(sorted({c["shield_cfg"] for c in stats})),
+                main_series=(None if all(c["main_series"] is None for c in stats)
+                             else all(c["main_series"] for c in stats)))
+
+
+FINAL_COUNTERS = ("steps", "E", "intercept", "takeover", "abort", "fallback", "N_att", "N_blocked",
+                  "N_busy", "N_no_lane", "N_att_int", "N_exec", "N_exec_int", "N_exec_other",
+                  "masked", "abort_ignored", "crashes")
+
+
+def final_counters(t):
+    """One line with the counters of protocol 7.7 (rss_shield.accounting) of an arm."""
+    return " ".join(f"{k}={t[k]}" for k in FINAL_COUNTERS) + f" | filter {t['shield_cfg']}"
 
 
 def arm(name, filt, reward, tot):
@@ -561,6 +574,11 @@ def report(args, R):
       f"манёвра, боковое правило «перекрытие или сближение» (п. 7.3, 7.7). Сиды пилота "
       f"900 000–900 129 (900 090–900 091 и 900 095–900 099 не используются). Проверяется "
       f"работоспособность цепочки; H1–H3 пилотом не проверяются." + (" **Режим --quick.**" if args.quick else ""))
+    a("")
+    a(f"Фактическая конфигурация фильтра по счётчикам эпизодов (adjacent_lane_model / lc_prediction / "
+      f"lateral_rule / зона): обучение — `{R['train_total']['shield_cfg']}`; оценочные плечи с фильтром — "
+      + "; ".join(f"{m['arm']}: `{m['shield_cfg']}`" for m in R["arms"] if m["main_series"] is not None)
+      + ". Пилот считается пройденным, только если во всех этих плечах использована конфигурация MAIN_SERIES.")
     z = window_bounds()
     a("")
     a(f"Зона проверки соседей (п. 7.4). Фильтр отбирает соседей по полной зоне reach(v, N) для "
@@ -896,6 +914,8 @@ def main(argv=None):
     write_csv(out / "train_episodes.csv", episodes)
     tot = totals(episodes)
     n_steps = max(tot["steps"], 1)
+    R["train_total"] = tot
+    log(f"  filter of the training episodes: {tot['shield_cfg']} (MAIN_SERIES: {tot['main_series']})")
     R["train"] = dict(steps=agent.steps, episodes=len(episodes), E=tot["E"], intercept=tot["intercept"],
                       crashes=tot["crashes"], stored=agent.buffer.size,
                       dropped=sum(c["dropped"] for c in episodes), updates=agent.updates,
@@ -1003,6 +1023,15 @@ def main(argv=None):
                   and b["check"]["max_dR"] < 1e-9 for b in R["baselines"].values())
           and all(m["N_exec_other"] == 0 for m in R["arms"])
           and all(t["N_exec_other"] == 0 for t in R["seek_total"]))
+    # the filter of the training and of every filtered evaluation arm is the main-series one
+    filtered = [R["train_total"]] + [m for m in R["arms"] if m["main_series"] is not None]
+    main_series = all(m["main_series"] for m in filtered)
+    log("final counters (protocol 7.7; decision set of rss_shield.accounting):")
+    log("  training Proposed: " + final_counters(R["train_total"]))
+    for m in R["arms"]:
+        log(f"  evaluation {m['arm']}: " + final_counters(m))
+    log(f"filter configuration of all filtered arms is MAIN_SERIES: {main_series}")
+    ok = ok and main_series
     log("pilot: " + ("OK" if ok else "CHECK FAILED"))
     return 0 if ok else 1
 

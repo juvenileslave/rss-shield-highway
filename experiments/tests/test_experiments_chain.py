@@ -284,3 +284,28 @@ def test_speed_outside_the_envelope_fails_loudly():
     other.speed = 35.0
     with pytest.raises(G.EnvelopeError):
         env.step(1)
+
+
+def test_main_series_generator_is_exposed_and_the_runner_reports_the_filter_configuration():
+    """Block 4: ProtocolHighwayEnv is exposed (package attribute and gymnasium id), gives the
+    86-feature observation, and an episode records which filter configuration it really used."""
+    import gymnasium
+
+    import experiments
+    from experiments.env import ENV_ID
+    from rss_shield.shield import MAIN_SERIES
+
+    assert experiments.ProtocolHighwayEnv is G.ProtocolHighwayEnv and experiments.N_OBS == 86
+    assert experiments.MAIN_SERIES is MAIN_SERIES and experiments.run_episode is run_episode
+    env = gymnasium.make(ENV_ID, config=dict(D=10, duration=4, **SHORT))
+    obs, _ = env.reset(seed=3)
+    assert isinstance(env.unwrapped, G.ProtocolHighwayEnv) and obs.shape == (N_OBS,) == (86,)
+    env = env.unwrapped
+    agent = DQN(seed=2)
+    c = run_episode(env, agent, rho=0.6, seed=3)
+    assert c["main_series"] is True and c["shield_cfg"] == "observed/nominal/approach/zone=reach"
+    c = run_episode(env, agent, rho=0.6, seed=3,
+                    shield_cfg=dict(adjacent_lane_model="occupancy", lc_prediction="worst_case"))
+    assert c["main_series"] is False and c["shield_cfg"].startswith("occupancy/worst_case")
+    c = run_episode(env, agent, shield_on=False, seed=3)
+    assert c["main_series"] is None and c["shield_cfg"] == "none"

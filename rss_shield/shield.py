@@ -111,6 +111,19 @@ V_LAT_OBS = 0.1   # m/s, lateral speed treated as an observed lane change / late
 MAIN_SERIES = dict(adjacent_lane_model="observed", lc_prediction="nominal", lateral_rule="approach")
 
 
+def is_main_series(cfg):
+    """cfg (ShieldConfig) is the configuration of the main series: MAIN_SERIES, nominal own-lane
+    prediction, complete per-vehicle neighbour zone, default lane-change horizon."""
+    return (all(getattr(cfg, k) == v for k, v in MAIN_SERIES.items())
+            and cfg.long_prediction == "nominal" and cfg.zone is None and cfg.lc_horizon == 2.0)
+
+
+def describe(cfg):
+    """Short text of a ShieldConfig for logs: adjacent model / lane-change prediction / lateral rule."""
+    zone = "reach" if cfg.zone is None else f"{cfg.zone:g}"
+    return f"{cfg.adjacent_lane_model}/{cfg.lc_prediction}/{cfg.lateral_rule}/zone={zone}"
+
+
 def lateral_danger(side, closing, rule="approach"):
     """Lateral part of an RSS dangerous situation, given side < d_min_lat (protocol 7.7).
     side    - lateral clearance between the bodies, m (< 0: lateral overlap, e.g. the same lane);

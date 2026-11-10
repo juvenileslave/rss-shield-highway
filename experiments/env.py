@@ -2,6 +2,8 @@
 Importing it enables fast_road in this process, including workers started with spawn."""
 import os
 
+import gymnasium
+
 from sim import fast_road
 from experiments.generator import ProtocolHighwayEnv
 
@@ -10,6 +12,11 @@ if FAST_ROAD:
     fast_road.enable()
 
 THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+
+
+ENV_ID = "rss-protocol-highway-v0"          # gymnasium id of the main-series generator
+if ENV_ID not in gymnasium.registry:
+    gymnasium.register(id=ENV_ID, entry_point="experiments.generator:ProtocolHighwayEnv")
 
 
 def make_env(D=25, **config):
