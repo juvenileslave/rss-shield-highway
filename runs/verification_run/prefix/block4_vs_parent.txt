@@ -1,0 +1,11 @@
+pre-fix commit: 317329c (Block 3: one decision set for E, N_att, N_blocked; journal invariant on every fr)
+overlay from the working tree: experiments/tests/test_experiments_chain.py
+tests: experiments/tests/test_experiments_chain.py::test_main_series_generator_is_exposed_and_the_runner_reports_the_filter_configuration
+
+F                                                                        [100%]
+=================================== FAILURES ===================================
+E   ImportError: cannot import name 'ENV_ID' from 'experiments.env' (experiments/env.py)
+experiments/tests/test_experiments_chain.py:295: ImportError: cannot import name 'ENV_ID' from 'experiments.env' (experiments/env.py)
+=========================== short test summary info ============================
+FAILED experiments/tests/test_experiments_chain.py::test_main_series_generator_is_exposed_and_the_runner_reports_the_filter_configuration
+1 failed

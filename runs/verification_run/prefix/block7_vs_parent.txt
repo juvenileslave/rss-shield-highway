@@ -1,0 +1,18 @@
+pre-fix commit: aa36980 (Block 6: the statistical plan as an executable specification, run on pilot data)
+overlay from the working tree: analysis/tests/test_power.py
+tests: analysis/tests/test_power.py
+
+
+==================================== ERRORS ====================================
+________________ ERROR collecting analysis/tests/test_power.py _________________
+ImportError while importing test module 'analysis/tests/test_power.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+analysis/tests/test_power.py:5: in <module>
+    from analysis import power as W
+E   ImportError: cannot import name 'power' from 'analysis' (analysis/__init__.py)
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error

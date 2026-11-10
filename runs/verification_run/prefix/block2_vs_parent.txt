@@ -1,0 +1,37 @@
+pre-fix commit: a8c3977 (Block 1: mask validated against the whole command FIFO, full traversed geometry)
+overlay from the working tree: tests experiments/tests rss_shield/scenarios.py
+tests: tests/test_queue_zone_statuses.py::test_Q3_control_fixed_150m_zone_admits_idle_and_300m_detects_the_leader tests/test_queue_zone_statuses.py::test_Q3c_zone_is_a_function_of_the_scenario_envelope tests/test_queue_zone_statuses.py::test_Q3c_zone_cannot_be_shrunk_after_validation experiments/tests/test_experiments_chain.py::test_traffic_window_covers_the_neighbour_zone experiments/tests/test_experiments_chain.py::test_speed_outside_the_envelope_fails_loudly
+
+ERROR: found no collectors for tests/test_queue_zone_statuses.py::test_Q3_control_fixed_150m_zone_admits_idle_and_300m_detects_the_leader
+
+ERROR: found no collectors for tests/test_queue_zone_statuses.py::test_Q3c_zone_is_a_function_of_the_scenario_envelope
+
+ERROR: found no collectors for tests/test_queue_zone_statuses.py::test_Q3c_zone_cannot_be_shrunk_after_validation
+
+ERROR: found no collectors for experiments/tests/test_experiments_chain.py::test_traffic_window_covers_the_neighbour_zone
+
+ERROR: found no collectors for experiments/tests/test_experiments_chain.py::test_speed_outside_the_envelope_fails_loudly
+
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/test_queue_zone_statuses.py ______________
+ImportError while importing test module 'tests/test_queue_zone_statuses.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_queue_zone_statuses.py:18: in <module>
+    from rss_shield.shield import (MAIN_SERIES, RSSShield, ShieldConfig, ZoneError, complete_zone,
+E   ImportError: cannot import name 'ZoneError' from 'rss_shield.shield' (rss_shield/shield.py)
+_________ ERROR collecting experiments/tests/test_experiments_chain.py _________
+ImportError while importing test module 'experiments/tests/test_experiments_chain.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+experiments/tests/test_experiments_chain.py:16: in <module>
+    from rss_shield.shield import ZoneError
+E   ImportError: cannot import name 'ZoneError' from 'rss_shield.shield' (rss_shield/shield.py)
+2 errors

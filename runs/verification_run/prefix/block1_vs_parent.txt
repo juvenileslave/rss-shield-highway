@@ -1,0 +1,44 @@
+pre-fix commit: c524d70 (Protocol: v12 — nominal prediction for manoeuvre lanes, approach lateral rule,)
+overlay from the working tree: tests rss_shield/scenarios.py rss_shield/sim.py
+tests: tests/test_queue_zone_statuses.py::test_Q1c_two_queued_lane_changes_are_checked_as_entry_into_lane_3 tests/test_queue_zone_statuses.py::test_Q1c_maneuver_over_two_lanes_checks_the_lane_in_between tests/test_queue_zone_statuses.py::test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep tests/test_queue_zone_statuses.py::test_Q2b_abort_without_a_lane_change_is_recorded_not_dropped
+
+FFFFFFF                                                                  [100%]
+=================================== FAILURES ===================================
+E   KeyError: 'lanes'
+tests/test_queue_zone_statuses.py:104: KeyError: 'lanes'
+E   assert (np.int64(1) == 0)
+tests/test_queue_zone_statuses.py:116: assert (np.int64(1) == 0)
+E   AssertionError: assert [(273, ['LANE...np.int64(0)])] == []
+      
+      Left contains one more item: (273, ['LANE_LEFT', None, 'LANE_LEFT', None], [np.int64(0), np.int64(1), np.int64(0), np.int64(1), np.int64(1)], [np.int64(0), np.int64(0), np.int64(0), np.int64(0), np.int64(0)])
+      Use -v to get more diff
+tests/test_queue_zone_statuses.py:153: AssertionError: assert [(273, ['LANE...np.int64(0)])] == []
+E   AssertionError: assert [(220, ['LANE...np.int64(0)])] == []
+      
+      Left contains 3 more items, first extra item: (220, ['LANE_LEFT', None, 'TAKEOVER', None], [np.int64(0), np.int64(1), np.int64(0), np.int64(1), np.int64(1)], [np.int64(0), np.int64(0), np.int64(0), np.int64(0), np.int64(0)])
+      Use -v to get more diff
+tests/test_queue_zone_statuses.py:153: AssertionError: assert [(220, ['LANE...np.int64(0)])] == []
+E   AssertionError: assert [(273, ['LANE...np.int64(0)])] == []
+      
+      Left contains one more item: (273, ['LANE_LEFT', None, 'LANE_LEFT', None], [np.int64(0), np.int64(1), np.int64(0), np.int64(1), np.int64(1)], [np.int64(0), np.int64(0), np.int64(0), np.int64(0), np.int64(0)])
+      Use -v to get more diff
+tests/test_queue_zone_statuses.py:153: AssertionError: assert [(273, ['LANE...np.int64(0)])] == []
+E   AssertionError: assert [(220, ['LANE...np.int64(0)])] == []
+      
+      Left contains 2 more items, first extra item: (220, ['LANE_LEFT', None, 'TAKEOVER', None], [np.int64(0), np.int64(0), np.int64(0), np.int64(1), np.int64(0)], [np.int64(0), np.int64(0), np.int64(0), np.int64(0), np.int64(0)])
+      Use -v to get more diff
+tests/test_queue_zone_statuses.py:153: AssertionError: assert [(220, ['LANE...np.int64(0)])] == []
+E   AssertionError: assert ('ABORT' == 'ABORT'
+      
+        ABORT and 0 == 1)
+     +  where 0 = DelayedRSSVehicle #928: [108.   4.].abort_ignored
+tests/test_queue_zone_statuses.py:235: AssertionError: assert ('ABORT' == 'ABORT'
+=========================== short test summary info ============================
+FAILED tests/test_queue_zone_statuses.py::test_Q1c_two_queued_lane_changes_are_checked_as_entry_into_lane_3
+FAILED tests/test_queue_zone_statuses.py::test_Q1c_maneuver_over_two_lanes_checks_the_lane_in_between
+FAILED tests/test_queue_zone_statuses.py::test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep[0.4-{}]
+FAILED tests/test_queue_zone_statuses.py::test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep[0.4-main]
+FAILED tests/test_queue_zone_statuses.py::test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep[1.0-{}]
+FAILED tests/test_queue_zone_statuses.py::test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep[1.0-main]
+FAILED tests/test_queue_zone_statuses.py::test_Q2b_abort_without_a_lane_change_is_recorded_not_dropped
+7 failed

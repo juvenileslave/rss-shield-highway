@@ -1,0 +1,18 @@
+pre-fix commit: 6df9abf (Block 5: one H1 event and one correct-start rule for every arm)
+overlay from the working tree: analysis/tests/test_plan.py
+tests: analysis/tests/test_plan.py
+
+
+==================================== ERRORS ====================================
+_________________ ERROR collecting analysis/tests/test_plan.py _________________
+ImportError while importing test module 'analysis/tests/test_plan.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+analysis/tests/test_plan.py:7: in <module>
+    from analysis import plan as P
+E   ImportError: cannot import name 'plan' from 'analysis' (unknown location)
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error
