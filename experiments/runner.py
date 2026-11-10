@@ -1,7 +1,9 @@
 """Episode loop with the RSS shield (Proposed, mode B or A) or without it (Baseline 1 / 2):
 semi-MDP transitions (7.2) and per-episode counters (7.7).
 
-Accounting (protocol 7.7):
+Accounting (protocol 7.7). The decision set - which steps are policy steps (exposure E) and
+which are intercept steps, and where a lane-change request is counted - is defined once in
+rss_shield.accounting and used here through count_step():
   policy step      A_safe(s_k) is not empty; the executed command is a policy action;
   intercept step   A_safe(s_k) is empty; the shield issues TAKEOVER, ABORT or FALLBACK. The type of
                    a step is set by its decision tick (who issued the command at s_k), not by the
@@ -13,9 +15,12 @@ Accounting (protocol 7.7):
   N_busy           of N_blocked: lane changes masked because a maneuver is in progress or waiting
                    in the FIFO (not an RSS block); N_no_lane - masked because there is no lane in
                    that direction; N_att_rss = N_att - N_busy - N_no_lane and
-                   N_blocked_rss = N_blocked - N_busy - N_no_lane are the RSS attempts / blocks
-                   used by the models of H3 and BLCR_rss = N_blocked_rss / N_att_rss;
-  N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR);
+                   N_blocked_rss = N_blocked - N_busy - N_no_lane are reported with
+                   BLCR_rss = N_blocked_rss / N_att_rss (descriptive);
+  N_att_int        intercept steps whose a_pi is a lane change (reported separately, not in BLCR).
+                   A request made while a maneuver is completed under a supervisory command is
+                   counted here as long as the supervisor decides, and in N_att / N_blocked /
+                   N_busy from the first policy step on - never in both;
   N_exec           executed lane changes, counted by the step that started the maneuver. vehicle.py
                    executes LANE_LEFT / LANE_RIGHT from target_lane_index when the command leaves
                    the FIFO, so a maneuver is registered when the command actually moves
@@ -44,16 +49,15 @@ import time
 
 import numpy as np
 
-from rss_shield.params import (ABORT, ACTION_INDEX, ACTIONS, DT, DT_DECISION, FALLBACK, LENGTH,
-                               SUPERVISORY, TAKEOVER, WIDTH)
+from rss_shield.accounting import (LANE_CHANGES, POLICY, block_reason, count_step,
+                                   new_counters)
+from rss_shield.params import ACTION_INDEX, ACTIONS, DT, DT_DECISION, LENGTH, WIDTH
 from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig
 from experiments.generator import queued_command
 from experiments.rewards import step_reward
 
 JERK_JUMP = 50.0      # m/s^3: a frame with |da|/dt above this is counted as a jump (diagnostics)
 NAMES = tuple(ACTIONS[i] for i in range(len(ACTIONS)))
-LANE_CHANGES = ("LANE_LEFT", "LANE_RIGHT")
-SUP_KEY = {TAKEOVER: "takeover", ABORT: "abort", FALLBACK: "fallback"}
 
 
 def mask_str(mask):
@@ -128,9 +132,8 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     cfg = dict(MAIN_SERIES if shield_cfg is None else shield_cfg)
     shield = RSSShield(ego, ShieldConfig(rho=rho, **cfg)) if shield_on else None
     asm = TransitionAssembler(agent.cfg["gamma"], agent.buffer.add) if train else None
-    c = dict(steps=0, E=0, intercept=0, takeover=0, abort=0, fallback=0, N_att=0, N_blocked=0,
-             N_busy=0, N_no_lane=0, N_att_int=0, N_exec=0, N_exec_int=0, N_exec_other=0,
-             masked=0, ret=0.0,
+    c = new_counters()
+    c.update(N_exec=0, N_exec_int=0, N_exec_other=0, ret=0.0,
              ttc_events=0, ttc_pen=0.0, col_pen=0.0, crashed=False,
              crash_intercept=False, crash_sup_active=False, crash_rear=False,
              t_policy=0.0, t_shield=0.0, t_env=0.0, t_learn=0.0)
@@ -152,24 +155,10 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
         else:
             cmd, mask, reason = a_pref, np.ones(len(NAMES), bool), "no_filter"
         t2 = time.perf_counter()
-        policy = cmd not in SUPERVISORY
-        if policy:
-            c["E"] += 1
-            if a_pi in LANE_CHANGES:
-                c["N_att"] += 1
-                blocked = not mask[ACTION_INDEX[a_pi]]
-                c["N_blocked"] += int(blocked)
-                if blocked and shield is not None:
-                    why = dec.violations.get(a_pi) or {}
-                    c["N_busy"] += int(bool(why.get("busy")))
-                    c["N_no_lane"] += int(bool(why.get("no_lane")))
-            c["masked"] += int(cmd != a_pi)
-            if asm is not None:
-                asm.policy_step(obs, mask, ACTION_INDEX[cmd], meta=(episode, k))
-        else:
-            c["intercept"] += 1
-            c[SUP_KEY[cmd]] += 1
-            c["N_att_int"] += int(a_pi in LANE_CHANGES)
+        why = dec.violations.get(a_pi) if shield is not None else None
+        policy = count_step(c, a_pi, cmd, mask, why) == POLICY
+        if policy and asm is not None:
+            asm.policy_step(obs, mask, ACTION_INDEX[cmd], meta=(episode, k))
         queued = queued_command(ego)
         in_fifo[ego.frame + ego.k_tau] = (k, policy)
         target_prev = ego.target_lane_index[2]
@@ -213,9 +202,11 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
             c["crash_sup_active"] = bool(ego.sup_active)
             c["crash_rear"] = rear_contact(ego, env.road)
         row = dict(episode=episode, k=k, t=round(k * DT_DECISION, 1), a_pi=a_pi, command=cmd,
-                   policy_step=int(policy), intervention=int(not policy), reason=reason,
-                   mask=mask_str(mask), queued=queued or "", active=ego.active_cmd or "",
-                   brake_mode=int(ego.brake_mode), sup_active=int(ego.sup_active),
+                   policy_step=int(policy), intervention=int(not policy),
+                   sup_cmd="" if policy else cmd, reason=reason,
+                   mask=mask_str(mask), block_reason=block_reason(a_pi, mask, why) if policy else "",
+                   queued=queued or "", active_cmd=ego.active_cmd or "",
+                   active_sup=int(ego.sup_active), brake_mode=int(ego.brake_mode),
                    return_active=int(ego.return_active), fallback=int(bool(ego.fallback)),
                    abort_ignored=int(ego.abort_ignored), lane=int(lane_now),
                    target_lane=int(ego.target_lane_index[2]), crossed=int(crossed),
@@ -234,7 +225,6 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
         c["t_shield"] += t2 - t1
         c["t_env"] += t3 - t2
         c["t_learn"] += t5 - t4
-        c["steps"] += 1
         k += 1
         obs = obs2
     if asm is not None:

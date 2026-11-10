@@ -12,11 +12,14 @@ import pytest
 from highway_env.vehicle.kinematics import Vehicle
 
 import queue_reference as QR
-from rss_shield.params import DT, ABORT, TAKEOVER, FALLBACK, ACTION_INDEX, V_MAX
+from rss_shield.accounting import (COUNTERS, count_step, counters_from_journal, new_counters,
+                                   step_kind)
+from rss_shield.params import DT, ABORT, TAKEOVER, FALLBACK, ACTION_INDEX, SUPERVISORY, V_MAX
 from rss_shield.rss import d_min_long
 from rss_shield import scenarios as S
-from rss_shield.shield import (MAIN_SERIES, RSSShield, ShieldConfig, ZoneError, complete_zone,
-                               envelope_zone, reach, require_zone)
+from rss_shield.shield import (MAIN_SERIES, Decision, RSSShield, ShieldConfig, ZoneError,
+                               complete_zone, envelope_zone, reach, require_zone)
+from rss_shield.sim import Runner, add_ego, make_road, scripted
 
 LL, LR = ACTION_INDEX["LANE_LEFT"], ACTION_INDEX["LANE_RIGHT"]
 IDLE = ACTION_INDEX["IDLE"]
@@ -371,3 +374,106 @@ def test_Q3c_zone_cannot_be_shrunk_after_validation():
     with pytest.raises(ZoneError):
         dataclasses.replace(cfg, zone=150.0)
     assert issubclass(ZoneError, ValueError)
+
+
+# ---------------------------------------------------------------- Q4: decision set
+def _journals():
+    yield S.scenario1A(0.2, "sync")
+    yield S.scenario1A(0.2, "worst", "once")
+    yield S.scenario1B(0.2, "nominal")
+    yield S.scenario_stop()
+    yield S.scenario_release()
+    yield S.scenario_random(0, T=20.0)
+    yield S.scenario2a()
+    yield S.scenario2b("i", model="observed")
+    yield S.scenario2b("iii", model="observed", T=8.0)
+    yield S.scenario_q1_double_lane_change()
+    yield S.scenario_q2_abort_crossing()
+    yield S.scenario_q2_scripted_abort()
+    road = make_road()                                   # ticks without a new command
+    ego = add_ego(road, 1, 100.0, 20.0, target_speed=20.0, initial_active="IDLE")
+    yield Runner(road, ego, scripted(lambda k, t: "FASTER" if k == 2 else None), 0.4).run(2.0)
+
+
+def test_Q4c_exactly_one_of_policy_step_and_intervention_on_every_frame():
+    n_int = n_pol = 0
+    for r in _journals():
+        for row in r.rows:
+            assert row["policy_step"] + row["intervention"] == 1, (r.name, row["frame"])
+            assert row["intervention"] == int(row["sup_cmd"] in SUPERVISORY)
+            assert "takeover" not in row                 # removed from the journal schema
+        for a, b in zip(r.rows[0::2], r.rows[1::2]):     # both frames of a decision interval
+            assert (a["policy_step"], a["sup_cmd"]) == (b["policy_step"], b["sup_cmd"])
+        n_int += sum(row["intervention"] for row in r.rows)
+        n_pol += sum(row["policy_step"] for row in r.rows)
+    assert n_int > 100 and n_pol > 100
+
+
+def test_Q4d_decision_takeover_is_a_deprecated_alias_of_intervention():
+    mask = [0] * 5
+    for cmd, brake in ((TAKEOVER, True), (FALLBACK, True), (ABORT, False), ("IDLE", False)):
+        d = Decision(cmd, "IDLE", None, mask)
+        assert d.intervention == (cmd in SUPERVISORY) and d.brake == brake
+        assert step_kind(cmd) == ("intervention" if d.intervention else "policy")
+        with pytest.warns(DeprecationWarning):
+            assert d.takeover == d.intervention
+    assert step_kind(None) == "policy"
+
+
+def _count(decisions):
+    c = new_counters()
+    kinds = [count_step(c, d.a_pi, d.command, d.mask, d.violations.get(d.a_pi)) for d in decisions]
+    return c, kinds
+
+
+@pytest.mark.parametrize("variant, sup", [("i", ABORT), ("iii", FALLBACK)])
+def test_Q4e_requests_while_a_maneuver_is_completed_on_an_intercept_segment(variant, sup):
+    """Scenario 2b, the policy asks LANE_RIGHT on every tick. The request of a tick at which the
+    supervisor decides goes to N_att_int; the request of a policy tick during the same maneuver
+    is an attempt blocked as busy (N_att, N_blocked, N_busy). Never both, never outside E."""
+    r = S.scenario2b(variant, model="observed", T=8.0, policy=lambda k, t: "LANE_RIGHT")
+    D = [d for _, _, d in r.decisions]
+    c, kinds = _count(D)
+    assert [d.command for d in D[:3]] == ["LANE_RIGHT", "IDLE", sup]
+    assert kinds[:3] == ["policy", "policy", "intervention"]
+    assert D[1].violations["LANE_RIGHT"]["busy"]             # queued lane change: busy, not RSS
+    n_int = sum(d.intervention for d in D)
+    assert c["intercept"] == n_int >= 1 and c["E"] == len(D) - n_int
+    assert c["N_att_int"] == n_int and c["N_att"] == c["E"]  # every request counted exactly once
+    assert c["N_att"] + c["N_att_int"] == c["steps"] == len(D)
+    assert c["N_busy"] >= 1 and c["N_blocked"] >= c["N_busy"]
+    for d, kind in zip(D, kinds):                            # the tick decides, not the active command
+        assert (kind == "intervention") == (d.command in SUPERVISORY)
+    # policy ticks while the supervisory command is still active or the maneuver is in progress
+    busy = [d for d in D if not d.intervention and (d.violations.get("LANE_RIGHT") or {}).get("busy")]
+    assert len(busy) == c["N_busy"] >= 2
+
+
+def test_Q4f_requests_are_counted_on_the_exposure_set_only():
+    """N_att and N_blocked are evaluated on the same steps as E; adding intercept steps changes
+    N_att_int (and the intercept counters) only."""
+    allow, block = [1, 1, 1, 1, 1], [0, 1, 0, 1, 1]
+    steps = [("LANE_LEFT", "LANE_LEFT", allow, None), ("LANE_RIGHT", "IDLE", block, {"rear": {}}),
+             ("IDLE", "IDLE", allow, None), ("LANE_RIGHT", "IDLE", block, {"busy": True}),
+             ("LANE_LEFT", "FASTER", block, {"no_lane": True}), ("FASTER", "FASTER", allow, None)]
+    base = new_counters()
+    for a_pi, cmd, mask, why in steps:
+        assert count_step(base, a_pi, cmd, mask, why) == "policy"
+    assert (base["E"], base["N_att"], base["N_blocked"], base["N_busy"], base["N_no_lane"],
+            base["masked"], base["N_att_int"], base["intercept"]) == (6, 4, 3, 1, 1, 3, 0, 0)
+    more = new_counters()
+    inserted = [("LANE_RIGHT", TAKEOVER), ("LANE_LEFT", ABORT), ("IDLE", FALLBACK), ("LANE_LEFT", TAKEOVER)]
+    for i, (a_pi, cmd, mask, why) in enumerate(steps):
+        count_step(more, a_pi, cmd, mask, why)
+        if i < len(inserted):
+            assert count_step(more, inserted[i][0], inserted[i][1], [0] * 5, {"rear": {}}) == "intervention"
+    changed = {k for k in COUNTERS if more[k] != base[k]}
+    assert changed == {"steps", "intercept", "takeover", "abort", "fallback", "N_att_int"}
+    assert more["N_att_int"] == 3 and more["intercept"] == 4 and more["steps"] == base["steps"] + 4
+    assert (more["E"], more["N_att"], more["N_blocked"]) == (base["E"], base["N_att"], base["N_blocked"])
+    # the same counters are recovered from the journal flags alone
+    rows = [dict(policy_step=1, intervention=0, a_pi=a, command=c, block_reason=(
+                 "busy" if (w or {}).get("busy") else "no_lane" if (w or {}).get("no_lane")
+                 else "rss" if not m[ACTION_INDEX.get(a, 1)] else "")) for a, c, m, w in steps]
+    rows += [dict(policy_step=0, intervention=1, a_pi=a, command=c, block_reason="") for a, c in inserted]
+    assert counters_from_journal(rows) == more

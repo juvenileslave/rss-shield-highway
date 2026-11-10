@@ -263,6 +263,15 @@ meas["Q4"] = (f"2b-i: intervention = 1 на кадрах {[row['frame'] for row 
               f"return_active на кадрах {first_frame(r.rows, lambda row: row['return_active'])}–"
               f"{max(row['frame'] for row in r.rows if row['return_active'])}; 1A sync: brake_mode = 1 с кадра "
               f"{first_frame(r1a.rows, lambda row: row['brake_mode'])}")
+from rss_shield.accounting import count_step, new_counters
+rq = S.scenario2b("i", model="observed", T=8.0, policy=lambda k, t: "LANE_RIGHT")
+cq = new_counters()
+for _, _, dq in rq.decisions:
+    count_step(cq, dq.a_pi, dq.command, dq.mask, dq.violations.get(dq.a_pi))
+one = all(row["policy_step"] + row["intervention"] == 1 for row in rq.rows + r.rows + r1a.rows)
+meas["Q4"] += (f"; policy_step + intervention = 1 на каждом кадре: {'да' if one else 'НЕТ'}; 2b-i с запросом LANE_RIGHT на "
+               f"каждом такте: шагов {cq['steps']}, E = {cq['E']}, перехват {cq['intercept']}, N_att = {cq['N_att']}, "
+               f"N_blocked = {cq['N_blocked']} (busy {cq['N_busy']}), N_att_int = {cq['N_att_int']}")
 
 with open("results/scenario2_setup.md", "w") as fh:
     fh.write("# Начальные условия сценария 2 (для R1.7). Дорога: 4 полосы, ширина 4 м, центр полосы i: y = 4i.\n\n")
@@ -317,7 +326,9 @@ rows3 += [
     ["Q3", "Полнота зоны проверки соседей", "0.1/0.4/1.0",
      "лидер v = 0 в 173 м при 30 м/с: IDLE запрещён (кадр 1: 164 < 167.625 м); фильтр = полная проверка", "точное",
      meas["Q3"], verdict(r"^test_Q3")],
-    ["Q4", "Статусы журнала", 0.4, "intervention, active_sup, brake_mode, return_active разведены", "точное",
+    ["Q4", "Статусы журнала и множество решений", 0.4,
+     "intervention, active_sup, brake_mode, return_active разведены; на каждом кадре ровно один из policy_step / "
+     "intervention; N_att и N_blocked на шагах политики (E), запросы на шагах перехвата только в N_att_int", "точное",
      meas["Q4"], verdict(r"^test_Q4")],
     ["E1–E3", "Интеграция с HighwayEnv.step()", 0.4, "задержка и ограничитель внутри _simulate()", "1e−9", "см. results/pytest.txt", verdict(r"^test_E\d")],
     ["R0", "Формулы RSS", "—", "43.4638 / 47.9175 / 56.9825 / 93.02; d_lat(0,0,0.4) = 0.86", "5e−3", "см. results/pytest.txt", verdict(r"^test_R0")],

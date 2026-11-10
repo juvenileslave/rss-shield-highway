@@ -5,23 +5,26 @@ frame start / the acceleration applied during the frame; *_end columns are the s
 end of the frame. Decision ticks are frames with k % 2 == 0 (t_k = 0.0, 0.2, ...).
 
 Status columns (protocol 7.5): supervisory intervention, active command and forced
-braking are logged separately.
-  policy_step   - 1 on both frames of a decision interval whose command came from the policy
-                  (after the mask): a policy step, part of the exposure E;
+braking are logged separately. The decision set is defined once, in rss_shield.accounting.
   intervention  - 1 on both frames of a decision interval governed by a supervisory decision
                   (TAKEOVER / ABORT / FALLBACK): intercept step, not part of the exposure E;
-                  both flags are set per decision interval (by the decision tick), so
-                  policy_step + intervention = 1 on every frame of an interval with a command;
+  policy_step   - 1 on both frames of every other decision interval (policy command after the
+                  mask, or no new command): a policy step, part of the exposure E;
+                  both flags are set per decision interval (by the decision tick), and
+                  policy_step + intervention = 1 on every frame;
   sup_cmd       - that supervisory command ("" otherwise);
   active_cmd    - command that left the FIFO last (acts now); active_sup - it is supervisory;
   brake_mode    - forced braking limiter [-8, -4] is on (TAKEOVER / FALLBACK active);
   return_active - a return to the origin lane (after ABORT) is in progress;
-  abort_ignored - cumulative number of ABORT commands that arrived after crossing.
+  abort_ignored - cumulative number of ABORT commands that started no return (after the
+                  crossing, or without a lane change to return from).
+There is no `takeover` column: Decision.takeover is a deprecated alias of Decision.intervention.
 """
 import csv
 import numpy as np
 from highway_env.road.road import Road, RoadNetwork
 
+from .accounting import INTERVENTION, step_kind
 from .params import DT, FRAMES_PER_DECISION, K_TAU, LENGTH, WIDTH, ACTION_INDEX, SUPERVISORY
 from .rss import d_min_long, d_min_lat
 from .shield import lateral_danger
@@ -100,7 +103,7 @@ def _danger(ego, others, rho):
 
 
 class Runner:
-    """controller(tick, t, runner) -> dict(command, a_pi, a_exec, mask, takeover, fallback, reason)."""
+    """controller(tick, t, runner) -> dict(command, a_pi, a_exec, mask, reason)."""
 
     def __init__(self, road, ego, controller, rho, name="run"):
         self.road, self.ego, self.controller, self.rho, self.name = road, ego, controller, rho, name
@@ -108,7 +111,7 @@ class Runner:
         self.t_contact = None
         self.last = dict(command="", a_pi="", a_exec="", mask="", reason="")
         self.sup = ""                        # supervisory command of the current decision interval
-        self.pol = 0                         # 1 if the current decision interval is a policy step
+        self.pol = 1                         # 1 if the current decision interval is a policy step
 
     def run(self, T, stop=None, stop_after_crash=0.0):
         n = int(round(T / DT))
@@ -123,8 +126,8 @@ class Runner:
                 if dec["command"] is not None:
                     ego.act(dec["command"])
                 self.last = dec
-                self.sup = dec["command"] if dec["command"] in SUPERVISORY else ""
-                self.pol = int(dec["command"] is not None and not self.sup)
+                self.sup = dec["command"] if step_kind(dec["command"]) == INTERVENTION else ""
+                self.pol = int(not self.sup)
             v_start = float(ego.speed)
             pending = ego.pending
             self.road.act()

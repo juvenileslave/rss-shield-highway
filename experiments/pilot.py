@@ -54,7 +54,8 @@ from experiments.dqn import DQN  # noqa: E402
 from experiments.env import FAST_ROAD, THREAD_VARS, make_env, reset_cached  # noqa: E402
 from experiments.generator import (I_BRAKE, I_LANE, I_SPEED, N_KIN, QUEUE_CODES, RHOS,  # noqa: E402
                                    SPEED_SEEN, initially_unsafe, window_bounds)
-from experiments.runner import JERK_JUMP, LANE_CHANGES, NAMES, mask_str, run_episode  # noqa: E402
+from experiments.runner import JERK_JUMP, NAMES, mask_str, run_episode  # noqa: E402
+from rss_shield.accounting import LANE_CHANGES  # noqa: E402
 from rss_shield.params import ABORT, ACTION_INDEX, LANE_WIDTH, WIDTH  # noqa: E402
 from rss_shield.rss import d_min_lat  # noqa: E402
 from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig  # noqa: E402
@@ -304,7 +305,7 @@ def records_section(agent, rows):
             steps.append([k0 + j, f"{r['t']:.1f}",
                           "политика" if r["policy_step"] else "перехват",
                           r["command"], r["reason"], r["mask"], r["queued"] or "—",
-                          r["active"] or "—", r["brake_mode"], f"{r['r']:.5f}",
+                          r["active_cmd"] or "—", r["brake_mode"], f"{r['r']:.5f}",
                           f"{GAMMA ** j * r['r']:.5f}"])
         parts.append(table(["такт", "t, с", "шаг", "команда", "причина", "маска",
                             "в FIFO", "активна после шага", "brake_mode", "r",
@@ -654,10 +655,10 @@ def report(args, R):
     a(f"Фрагмент эпизода {ep_pick} (сид {R['eval'][ep_pick]['seed']}; первые шаги, все шаги перехвата "
       f"и пересечения разметки):")
     a("")
-    a(table(["k", "aπ", "команда", "маска", "policy_step", "intervention", "active", "brake_mode",
+    a(table(["k", "aπ", "команда", "маска", "policy_step", "intervention", "active_cmd", "brake_mode",
              "return_active", "полоса", "пересечение", "exec_from", "v, м/с", "r"],
             [[r["k"], r["a_pi"], r["command"], r["mask"], r["policy_step"], r["intervention"],
-              r["active"] or "—", r["brake_mode"], r["return_active"], r["lane"], r["crossed"],
+              r["active_cmd"] or "—", r["brake_mode"], r["return_active"], r["lane"], r["crossed"],
               r["exec_from"] if r["exec_from"] != "" else "—", r["v"], r["r"]]
              for r in pick]))
     a("")
@@ -767,7 +768,7 @@ def report(args, R):
         a(table(["k", "t, с", "aπ", "команда", "причина", "маска", "в FIFO", "активна после шага",
                  "return_active", "полоса", "целевая полоса", "пересечение", "exec_from", "v, м/с"],
                 [[r["k"], r["t"], r["a_pi"], r["command"], r["reason"], r["mask"], r["queued"] or "—",
-                  r["active"] or "—", r["return_active"], r["lane"], r["target_lane"], r["crossed"],
+                  r["active_cmd"] or "—", r["return_active"], r["lane"], r["target_lane"], r["crossed"],
                   r["exec_from"] if r["exec_from"] != "" else "—", r["v"]] for r in frag["rows"]]))
     else:
         a("ABORT в прогонах искателя не встретился, поэтому ветвь ABORT на основном генераторе пилотом "

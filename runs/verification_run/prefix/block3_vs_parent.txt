@@ -1,0 +1,15 @@
+pre-fix commit: f655203 (Block 2: neighbour zone as a function of the scenario envelope, loud failure)
+overlay from the working tree: tests experiments/tests rss_shield/scenarios.py rss_shield/accounting.py
+tests: tests/test_queue_zone_statuses.py::test_Q4c_exactly_one_of_policy_step_and_intervention_on_every_frame experiments/tests/test_experiments_chain.py::test_runner_counters_and_semi_mdp_records
+
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+E   AssertionError: ('run', 0)
+    assert (0 + 0) == 1
+tests/test_queue_zone_statuses.py:402: AssertionError: ('run', 0)
+E   KeyError: 'sup_cmd'
+experiments/tests/test_experiments_chain.py:234: KeyError: 'sup_cmd'
+=========================== short test summary info ============================
+FAILED tests/test_queue_zone_statuses.py::test_Q4c_exactly_one_of_policy_step_and_intervention_on_every_frame
+FAILED experiments/tests/test_experiments_chain.py::test_runner_counters_and_semi_mdp_records
+2 failed

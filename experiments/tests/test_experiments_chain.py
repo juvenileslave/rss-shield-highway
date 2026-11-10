@@ -12,6 +12,7 @@ from experiments.dqn import DQN, backward, forward, init_mlp
 from experiments.generator import (I_BRAKE, I_SPEED, N_KIN, N_OBS, QUEUE_CODES, RHO_INSERT, RHOS,
                                    S_MIN, WINDOW_BACK, WINDOW_FRONT, idm_equilibrium_speed)
 from experiments.runner import TransitionAssembler, run_episode
+from rss_shield.accounting import COUNTERS, LANE_CHANGES, counters_from_journal
 from rss_shield.params import LENGTH, TAKEOVER
 from rss_shield.shield import ZoneError
 
@@ -225,6 +226,19 @@ def test_runner_counters_and_semi_mdp_records():
         assert c["N_exec_int"] <= c["N_exec"]
         assert c["N_exec_other"] == 0        # every crossing is traced to a policy-issued command
         assert c["steps"] <= 50
+    for i, c in enumerate(stats):
+        # the journal flags alone give the same decision set: E, N_att and N_blocked are counted
+        # on policy steps, lane-change requests of intercept steps only in N_att_int
+        J = [r for r in log if r["episode"] == i]
+        assert all(r["policy_step"] + r["intervention"] == 1 for r in J)
+        assert all((r["sup_cmd"] != "") == bool(r["intervention"]) for r in J)
+        again = counters_from_journal(J)
+        assert again == {k: c[k] for k in COUNTERS}
+        pol = [r for r in J if r["policy_step"]]
+        assert c["E"] == len(pol) and c["N_att"] == sum(r["a_pi"] in LANE_CHANGES for r in pol)
+        assert c["N_blocked"] == sum(bool(r["block_reason"]) for r in pol)
+        assert c["N_att_int"] == sum(r["a_pi"] in LANE_CHANGES for r in J if r["intervention"])
+        assert all(r["block_reason"] == "" for r in J if r["intervention"])
     rows = {(r["episode"], r["k"]): r for r in log}
     b = agent.buffer
     assert b.size == sum(c["stored"] for c in stats) > 0
