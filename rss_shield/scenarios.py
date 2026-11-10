@@ -1,6 +1,6 @@
 """Control scenarios of protocol section 7.5 (v6) with the fixes of the v7 instruction."""
 import numpy as np
-from .params import DT, LENGTH, TAKEOVER, ABORT, A_MAX_BRAKE
+from .params import DT, K_TAU, LENGTH, TAKEOVER, ABORT, FALLBACK, A_MAX_BRAKE
 from .rss import d_min_long
 from .sim import make_road, add_ego, add_scripted, Runner, scripted, shielded
 from .shield import RSSShield, ShieldConfig
@@ -156,13 +156,16 @@ def profile_lane_change(v=20.0, T=4.0):
 
 
 # ---------------------------------------------------------------- regression checks Q1-Q4
-def scenario_q1_scene(rho=0.4):
-    """Q1: ego lane 1, 20 m/s (target 20); R in lane 3, 10 m behind (bumper gap),
-    25 m/s, no reaction. Returns (road, ego, shield) before tick 0."""
+def scenario_q1_scene(rho=0.4, gap_r=10.0, v_r=25.0, lane_r=3, k_tau=K_TAU, shield=RSSShield):
+    """Q1: ego lane 1, 20 m/s (target 20); R in lane lane_r, gap_r m behind (bumper gap),
+    v_r m/s, no reaction. gap_r = 5, v_r = 28 is the counterexample of the review: a second
+    LANE_RIGHT at 0.2 s leads to lane 3 with a rear gap of 1.661 m against 97.685 m.
+    k_tau: FIFO length of the ego (4 frames hold the commands of two decisions).
+    Returns (road, ego, shield) before tick 0."""
     road = make_road()
-    ego = add_ego(road, 1, X0, 20.0, target_speed=20.0, initial_active="IDLE")
-    add_scripted(road, 3, X0 - LENGTH - 10.0, 25.0, "R")
-    return road, ego, RSSShield(ego, ShieldConfig(rho=rho, adjacent_lane_model="observed"))
+    ego = add_ego(road, 1, X0, 20.0, target_speed=20.0, initial_active="IDLE", k_tau=k_tau)
+    add_scripted(road, lane_r, X0 - LENGTH - gap_r, v_r, "R")
+    return road, ego, shield(ego, ShieldConfig(rho=rho, adjacent_lane_model="observed"))
 
 
 def scenario_q1_double_lane_change(rho=0.4, T=4.0):
@@ -181,7 +184,7 @@ Q2_LATE_ABORT_CASES = ((8.0, 15.0, 0.0), (10.0, 15.0, 0.0), (10.0, 15.0, 0.2), (
                        (14.0, 30.0, 0.2), (16.0, 25.0, 0.4), (16.0, 30.0, 0.4), (20.0, 40.0, 0.4))
 
 
-def scenario_q2_abort_crossing(v=10.0, gap_n=15.0, t_b=0.0, rho=0.4, T=3.0):
+def scenario_q2_abort_crossing(v=10.0, gap_n=15.0, t_b=0.0, rho=0.4, T=3.0, shield=RSSShield):
     """Q2: scenario 2b-i at speed v. Ego lane 1 -> 2 (LANE_RIGHT at tick 0, then
     IDLE); N in lane 3, bumper gap gap_n ahead, speed v, starts a lane change into lane 2 at t_b.
     Without the queue check, (10, 15, 0): ABORT decided at 0.4 s, active at 0.6 s, crossing on
@@ -189,7 +192,7 @@ def scenario_q2_abort_crossing(v=10.0, gap_n=15.0, t_b=0.0, rho=0.4, T=3.0):
     road = make_road()
     ego = add_ego(road, 1, X0, v, target_speed=v, initial_active="IDLE")
     add_scripted(road, 3, X0 + LENGTH + gap_n, v, "N", lane_change=(t_b, ("0", "1", 2)))
-    sh = RSSShield(ego, ShieldConfig(rho=rho, adjacent_lane_model="observed"))
+    sh = shield(ego, ShieldConfig(rho=rho, adjacent_lane_model="observed"))
     r = Runner(road, ego, shielded(sh, lambda k, t: "LANE_RIGHT" if k == 0 else "IDLE"), rho,
                name=f"Q2_abort_v{v:g}_gap{gap_n:g}_tb{t_b:g}")
     r.run(T, stop_after_crash=0.5)
@@ -248,6 +251,37 @@ def scenario_q3_random(seed, n=40, ticks=1):
                      lane_change=lc)
     for _ in range(ticks):
         ego.act(str(rng.choice(["IDLE", "FASTER", "SLOWER", "LANE_LEFT", "LANE_RIGHT"])))
+        for _ in range(2):
+            road.act()
+            road.step(DT)
+    return road, ego
+
+
+QUEUE_PREFIX = ("LANE_RIGHT", "LANE_LEFT", "LANE_RIGHT", "LANE_LEFT", "IDLE", "FASTER", "SLOWER",
+                ABORT, TAKEOVER, FALLBACK)
+
+
+def scenario_queue_random(seed, n=40):
+    """Q1: random scene with commands waiting in the FIFO. Scene of scenario_q3_random; the ego
+    (FIFO of 2 or 4 frames) then receives 1-3 random commands without the filter, lane changes and
+    supervisory commands included, so that at the check the FIFO holds queued lane changes, the
+    maneuver may span two lanes, be reversed or be returned by ABORT; in 60 % of the scenes a
+    faster vehicle C drives close behind the ego in another lane. Returns (road, ego)."""
+    rng = np.random.RandomState(1000 + seed)
+    road, ego0 = scenario_q3_random(seed, n=n, ticks=0)
+    k_tau = int(rng.choice([K_TAU, 2 * K_TAU]))
+    ego = add_ego(road, ego0.lane_index[2], float(ego0.position[0]), float(ego0.speed),
+                  target_speed=float(ego0.target_speed), initial_active="IDLE", k_tau=k_tau)
+    road.vehicles.remove(ego0)
+    lane_e, xe = ego.lane_index[2], float(ego.position[0])
+    if rng.rand() < 0.6:                       # a faster vehicle close behind in another lane
+        lane_c = int(rng.choice([i for i in range(4) if i != lane_e]))
+        xc = xe - LENGTH - float(rng.uniform(4.0, 30.0))
+        if all(abs(float(v.position[0]) - xc) > 12.0 for v in road.vehicles
+               if v.lane_index[2] == lane_c):
+            add_scripted(road, lane_c, xc, min(40.0, float(ego.speed + rng.uniform(0.0, 12.0))), "C")
+    for _ in range(1 + int(rng.randint(3))):
+        ego.act(str(rng.choice(QUEUE_PREFIX)))
         for _ in range(2):
             road.act()
             road.step(DT)

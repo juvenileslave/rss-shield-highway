@@ -47,7 +47,7 @@ class DelayedRSSVehicle(MDPVehicle):
         self.maneuver = None                   # dict(origin, target, crossed, kind)
         self.limiter_active = False
         self.released_frame = None             # frame at which takeover was released
-        self.abort_ignored = 0                 # ABORT commands that arrived after crossing
+        self.abort_ignored = 0                 # ABORT commands that started no return
 
     # ------------------------------------------------------------------ commands
     def act(self, action=None):
@@ -78,15 +78,16 @@ class DelayedRSSVehicle(MDPVehicle):
             return
         if cmd == ABORT:
             # idempotent: a repeated ABORT during the return must not swap origin/target back;
-            # after the marking is crossed the return is not executed (7.4, item 3): the lateral
-            # target is kept and the event is counted (the shield never issues such an ABORT)
+            # after the marking is crossed (or when no lane change is left to return from) the
+            # return is not executed (7.4, item 3): the lateral target is kept and the command is
+            # counted in abort_ignored (the shield never issues such an ABORT)
             m = self.maneuver
             if m is not None and m["kind"] == "lane_change" and not m["crossed"]:
                 origin = m["origin"]
                 self.maneuver = dict(origin=m["target"], target=origin,
                                      crossed=False, kind="return")
                 self.target_lane_index = origin
-            elif m is not None and m["kind"] == "lane_change":
+            elif m is None or m["kind"] == "lane_change":
                 self.abort_ignored += 1
             MDPVehicle.act(self)
             return
@@ -121,7 +122,9 @@ class DelayedRSSVehicle(MDPVehicle):
         super().on_state_update()
         m = getattr(self, "maneuver", None)
         if m is not None and self.road is not None:
-            if self.lane_index == m["target"]:
+            # crossed: the ego centre left the origin lane (first marking of a maneuver that spans
+            # several lanes) or is in the target lane (reversal / return: origin lane = target)
+            if self.lane_index == m["target"] or self.lane_index != m["origin"]:
                 m["crossed"] = True
             lat = self.road.network.get_lane(m["target"]).local_coordinates(self.position)[1]
             if m["crossed"] and abs(lat) < MANEUVER_DONE_TOL:

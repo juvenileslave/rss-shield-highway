@@ -8,12 +8,22 @@ Q4 - journal: supervisory intervention, active command and forced braking are se
 """
 import pytest
 
+import queue_reference as QR
 from rss_shield.params import DT, ABORT, TAKEOVER, FALLBACK, ACTION_INDEX, V_MAX
 from rss_shield.rss import d_min_long
 from rss_shield import scenarios as S
-from rss_shield.shield import RSSShield, ShieldConfig, complete_zone, reach
+from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig, complete_zone, reach
 
 LL, LR = ACTION_INDEX["LANE_LEFT"], ACTION_INDEX["LANE_RIGHT"]
+IDLE = ACTION_INDEX["IDLE"]
+
+
+class InstantStateShield(RSSShield):
+    """Control: the behaviour before the fix - the mask and the supervision read the current
+    maneuver / target lane instead of the state after the FIFO."""
+
+    def plan_state(self):
+        return self.ego.ghost()
 
 
 def _tick(road, ego, cmd):
@@ -52,6 +62,105 @@ def test_Q1_repeated_lane_change_before_activation_is_masked():
     assert d1.mask[LR] == 0 and d1.mask[LL] == 0 and d1.command != "LANE_RIGHT"
     assert {row["target_lane_index"] for row in r.rows} == {1, 2}
     assert r.rows[-1]["y_end"] == pytest.approx(8.0, abs=0.1) and r.t_contact is None
+
+
+def test_Q1_review_counterexample_gap_1_661_vs_97_685_is_forbidden():
+    """R in lane 3, 5 m behind at 28 m/s: the second LANE_RIGHT (0.2 s) really leads to lane 3,
+    rear gap 1.661 m against d_min_long = 97.685 m. The mask must not offer it."""
+    road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0)
+    assert sh.decide("LANE_RIGHT").command == "LANE_RIGHT"
+    _tick(road, ego, "LANE_RIGHT")
+    rear = QR.command_violations(ego, sh.cfg, "LANE_RIGHT")["rear"]
+    assert rear["vehicle"] == "R"
+    assert rear["gap"] == pytest.approx(1.661, abs=5e-4)
+    assert rear["d_min_long"] == pytest.approx(97.685, abs=5e-4)
+    d1 = sh.decide("LANE_RIGHT")
+    assert d1.mask[LR] == 0 and d1.command != "LANE_RIGHT"
+    assert list(d1.mask) == list(QR.reference_mask(ego, sh.cfg))
+
+
+def test_Q1_control_instantaneous_state_admits_the_counterexample():
+    """Control of the test above: a mask that reads the current maneuver (behaviour before the
+    fix) allows the second LANE_RIGHT although the lane it leads to violates the criterion."""
+    road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0, shield=InstantStateShield)
+    _tick(road, ego, sh.decide("LANE_RIGHT").command)
+    d1 = sh.decide("LANE_RIGHT")
+    assert d1.mask[LR] == 1 and d1.command == "LANE_RIGHT"
+    assert QR.command_violations(ego, sh.cfg, "LANE_RIGHT")["rear"]["gap"] < 2.0
+    assert QR.reference_mask(ego, sh.cfg)[LR] == 0
+
+
+def test_Q1c_two_queued_lane_changes_are_checked_as_entry_into_lane_3():
+    """FIFO of 4 frames: two LANE_RIGHT (issued without the filter) wait in it. After the queue
+    the maneuver is 1 -> 3; every action is checked with the vehicles behind in lanes 2 and 3."""
+    road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0, k_tau=4)
+    _tick(road, ego, "LANE_RIGHT")
+    _tick(road, ego, "LANE_RIGHT")
+    assert ego.maneuver is None and [c for c in ego.fifo if c] == ["LANE_RIGHT", "LANE_RIGHT"]
+    m, info = sh.mask()
+    assert m.sum() == 0 and info["IDLE"]["rear"]["vehicle"] == "R"
+    assert info["LANE_RIGHT"]["busy"] and info["LANE_LEFT"]["busy"]
+    assert list(m) == list(QR.reference_mask(ego, sh.cfg))
+    assert sh.plan["target_lane"] == 3 and sh.plan["lanes"] == {2, 3}
+    assert sh.plan["maneuver"]["origin"][2] == 1 and sh.plan["maneuver"]["target"][2] == 3
+
+
+def test_Q1c_maneuver_over_two_lanes_checks_the_lane_in_between():
+    """Two LANE_RIGHT without the filter (ticks 0 and 1): at tick 2 the maneuver 1 -> 3 is active.
+    R drives in lane 2 (the lane in between), close behind: IDLE must be checked against it,
+    not only against lane 3."""
+    road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0, lane_r=2)
+    _tick(road, ego, "LANE_RIGHT")
+    _tick(road, ego, "LANE_RIGHT")
+    m, info = sh.mask()
+    assert m[IDLE] == 0 and info["IDLE"]["rear"]["vehicle"] == "R"
+    assert list(m) == list(QR.reference_mask(ego, sh.cfg))
+    man = sh.plan["maneuver"]
+    assert (man["origin"][2], man["target"][2]) == (1, 3) and sh.plan["lanes"] == {2, 3}
+
+
+QUEUE_SWEEP = [(rho, cfg) for rho in (0.4, 1.0) for cfg in ({}, MAIN_SERIES)]
+# 220, 273, 363: a maneuver over two lanes with a vehicle close behind in the lane in between
+QUEUE_SEEDS = (*range(60), 220, 273, 363)
+
+
+def _sweep(rho, kw, shield=RSSShield):
+    """(scenes where the mask differs from the unlimited reference, coverage of the sweep)."""
+    seen = dict(queued_lc=0, two_lanes=0, busy=0, lc_allowed=0, lc_refused=0)
+    diff = []
+    for seed in QUEUE_SEEDS:
+        road, ego = S.scenario_queue_random(seed)
+        cfg = ShieldConfig(rho=rho, **kw)
+        m, info = shield(ego, cfg).mask()
+        ref = QR.reference_mask(ego, cfg)
+        if list(m) != list(ref):
+            diff.append((seed, list(ego.fifo), list(m), list(ref)))
+        lanes = QR.lanes_after_queue(ego)
+        seen["queued_lc"] += any(c in ("LANE_LEFT", "LANE_RIGHT") for c in ego.fifo)
+        seen["two_lanes"] += len(lanes) > 1
+        seen["busy"] += bool(lanes)
+        seen["lc_allowed"] += int(ref[LL] + ref[LR] > 0)
+        seen["lc_refused"] += any("front" in info[a] or "rear" in info[a]
+                                  for a in ("LANE_LEFT", "LANE_RIGHT"))
+    return diff, seen
+
+
+@pytest.mark.parametrize("rho, kw", QUEUE_SWEEP, ids=lambda x: "main" if x == MAIN_SERIES else str(x))
+def test_Q1d_mask_equals_unlimited_reference_on_queued_command_sweep(rho, kw):
+    """Random scenes with lane changes / supervisory commands waiting in the FIFO (2 or 4
+    frames): the mask (default neighbour zone) equals the independent unlimited reference."""
+    diff, seen = _sweep(rho, kw)
+    assert diff == []
+    assert all(seen.values()), seen                 # the sweep exercises every branch
+
+
+def test_Q1d_control_instantaneous_state_fails_the_sweep():
+    """Control of the sweep: the mask that reads the current maneuver (behaviour before the fix)
+    differs from the reference on scenes with a queued lane change."""
+    diff, _ = _sweep(0.4, MAIN_SERIES, shield=InstantStateShield)
+    assert len(diff) >= 5
+    assert all(any(c in ("LANE_LEFT", "LANE_RIGHT", ABORT, FALLBACK) for c in fifo)
+               for _, fifo, _, _ in diff)
 
 
 # ---------------------------------------------------------------- Q2
@@ -101,6 +210,30 @@ def test_Q2b_vehicle_ignores_abort_arriving_after_crossing():
     assert r.ego.abort_ignored == 1 and r.rows[-1]["abort_ignored"] == 1
     assert all(row["lane_index"] == 2 and row["return_active"] == 0 for row in r.rows[cross:])
     assert r.rows[-1]["target_lane_index"] == 2
+
+
+def test_Q2_control_instantaneous_state_issues_abort_that_lands_after_crossing():
+    """Control of Q2: a supervision that reads the current maneuver state (behaviour before the
+    fix) schedules the return at 0.4 s, before the crossing (frame 5); it leaves the FIFO at
+    0.6 s, after it. The vehicle refuses it: abort_ignored, no return."""
+    r = S.scenario_q2_abort_crossing(10.0, 15.0, 0.0, shield=InstantStateShield)
+    aborts = [round(t, 1) for _, t, d in r.decisions if d.command == ABORT]
+    cross = _first(r.rows, lambda row: row["lane_index"] == 2)
+    act = _first(r.rows, lambda row: row["active_cmd"] == ABORT)
+    assert aborts[0] == 0.4 and cross == 5 and act == 6
+    assert r.ego.abort_ignored >= 1 and r.rows[act]["abort_ignored"] == 1
+    assert all(row["return_active"] == 0 for row in r.rows)
+    assert all(row["lane_index"] == 2 for row in r.rows[cross:])
+
+
+def test_Q2b_abort_without_a_lane_change_is_recorded_not_dropped():
+    """An ABORT that leaves the FIFO after the maneuver is completed (or without any maneuver)
+    starts no return and is counted in abort_ignored."""
+    road, ego, _ = S.scenario_q1_scene()
+    _tick(road, ego, ABORT)
+    _tick(road, ego, None)
+    assert ego.active_cmd == ABORT and ego.abort_ignored == 1
+    assert ego.maneuver is None and not ego.return_active and ego.target_lane_index[2] == 1
 
 
 # ---------------------------------------------------------------- Q3

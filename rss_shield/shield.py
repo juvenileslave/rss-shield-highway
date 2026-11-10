@@ -25,7 +25,12 @@ without a new command). Consequences:
     LANE_RIGHT are not offered again until it is completed (no second lane change before the
     first one is active), and the other actions are checked with the lane-change horizon and
     the vehicles behind in its target lane;
-  * the target lane of a new lane change is counted from the target lane after the queue;
+  * the target lane of a new lane change is counted from the target lane after the queue, and
+    the lanes it enters are all lanes between the lane of the ego centre and that final target
+    (maneuver_lanes(): the full traversed geometry, not only the first lane entered). The same
+    holds for a maneuver that already spans several lanes (lane changes chained in a FIFO longer
+    than one decision period, or issued without the filter): vehicles behind are checked in every
+    lane it still has to enter;
   * ABORT is offered only if the return becomes active before the lane marking is crossed:
     the command chosen now leaves the FIFO after k_tau frames, so the check uses the maneuver
     state at that moment, not the current one. The vehicle ignores an ABORT that arrives
@@ -124,6 +129,18 @@ def reach(v, n, rho):
     neighbour for a vehicle behind)."""
     v = max(0.0, float(v))
     return LENGTH + d_min_long(v + A_MAX_ACCEL * n * DT, 0.0, rho) + path_bound(v, n)
+
+
+def lanes_entered(lane_from, lane_to):
+    """Lane ids entered on the way from lane_from to lane_to: every lane after lane_from up to and
+    including lane_to; {lane_to} when they coincide (reversal / return into the same lane)."""
+    step = 1 if lane_to >= lane_from else -1
+    return set(range(lane_from + step, lane_to + step, step)) or {lane_to}
+
+
+def maneuver_lanes(man):
+    """Lanes a maneuver (dict of DelayedRSSVehicle.maneuver) enters: full traversed geometry."""
+    return lanes_entered(man["origin"][2], man["target"][2])
 
 
 def complete_zone(rho, lc_horizon=2.0, v_max=V_MAX):
@@ -387,8 +404,10 @@ class RSSShield:
         g = self.plan_state()
         man = g.maneuver                      # maneuver in progress after the queue
         lane = self._lane_id(g.target_lane_index)
+        centre = self._lane_id(g.lane_index)  # lane of the ego centre after the queue
         self.plan = dict(maneuver=None if man is None else dict(man), target_lane=lane,
-                         queued=[c for c in self.ego.fifo if c is not None])
+                         lane=centre, queued=[c for c in self.ego.fifo if c is not None],
+                         lanes=set() if man is None else maneuver_lanes(man))
         for idx, name in ACTIONS.items():
             if name in ("LANE_LEFT", "LANE_RIGHT"):
                 if man is not None:
@@ -399,11 +418,10 @@ class RSSShield:
                 if tl is None:
                     info[name] = {"no_lane": True}
                     continue
-                v = self.check_plan([name], lc_frames, {tl})
+                v = self.check_plan([name], lc_frames, lanes_entered(centre, tl))
             else:
                 if man is not None:
-                    tl = self._lane_id(man["target"])
-                    v = self.check_plan([name], lc_frames, {tl})
+                    v = self.check_plan([name], lc_frames, self.plan["lanes"])
                 else:
                     v = self.check_plan([name], keep_frames, set())
             m[idx] = int(not v)
@@ -426,7 +444,6 @@ class RSSShield:
         lc_frames = self.lc_frames
         if man is not None and man["kind"] in ("lane_change", "return"):
             origin = self._lane_id(man["origin"])
-            target = self._lane_id(man["target"])
             if man["kind"] == "lane_change":
                 if man["crossed"]:
                     # the return would become active after the marking is crossed (7.4, item 3)
@@ -437,7 +454,7 @@ class RSSShield:
                     if not v:
                         return Decision(ABORT, a_pi, None, m, reason="return",
                                         violations=info)
-            v = self.check_plan([TAKEOVER], lc_frames, {target})
+            v = self.check_plan([TAKEOVER], lc_frames, maneuver_lanes(man))
             info["COMPLETE_BRAKE"] = v
             if not v:
                 return Decision(TAKEOVER, a_pi, None, m, reason="complete",

@@ -181,6 +181,23 @@ meas["Q1"] = (f"такт 1: LANE_RIGHT в очереди (активен с ка
               f"маска {''.join(map(str, r.decisions[1][2].mask))}; команды {cmds(r)}; "
               f"target_lane_index ∈ {sorted({int(row['target_lane_index']) for row in r.rows})}; итог y = {r.rows[-1]['y_end']:.3f}; "
               f"проверка полосы 3 на такте 1: зазор сзади {v3['gap']:.3f} < {v3['d_min_long']:.3f} м (кадр {v3['frame']})")
+import queue_reference as QR
+road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0)       # counterexample of the review
+ego.act(sh.decide("LANE_RIGHT").command)
+for _ in range(2):
+    road.act(); road.step(0.1)
+cx = QR.command_violations(ego, sh.cfg, "LANE_RIGHT")["rear"]
+cx_mask = sh.decide("LANE_RIGHT").mask
+road, ego, sh = S.scenario_q1_scene(gap_r=5.0, v_r=28.0, k_tau=4)   # two lane changes in the FIFO
+for _ in range(2):
+    ego.act("LANE_RIGHT")
+    for _ in range(2):
+        road.act(); road.step(0.1)
+m4 = sh.mask()[0]
+meas["Q1"] += (f"; контрпример (R в полосе 3, 5 м сзади, 28 м/с): вторая LANE_RIGHT ведёт в полосу 3, зазор "
+               f"{cx['gap']:.3f} < {cx['d_min_long']:.3f} м, маска {''.join(map(str, cx_mask))}; две смены полосы в FIFO "
+               f"из 4 кадров: цель после очереди {sh.plan['target_lane']}, полосы манёвра {sorted(sh.plan['lanes'])}, "
+               f"маска {''.join(map(str, m4))}")
 late = early = after = crashes = ignored = 0
 for case in S.Q2_LATE_ABORT_CASES:
     rr = S.scenario_q2_abort_crossing(*case)
@@ -284,7 +301,8 @@ rows3 += [
     ["T2b-iii", "2b-iii", 0.4, "FALLBACK на такте 2, флаг fallback с кадра 6", "точное", meas["T2b-iii"], verdict(r"^test_T2b_iii")],
     ["T2b-occ", "2b, модель occupancy", 0.4, "LANE_RIGHT запрещён на такте 0", "точное", meas["T2b-occ"], verdict(r"^test_T2b_occ")],
     ["Q1", "Повторная смена полосы до активации предыдущей", 0.4,
-     "такт 1: LANE_LEFT/LANE_RIGHT = 0 (манёвр в очереди), цель не дальше полосы 2", "точное", meas["Q1"], verdict(r"^test_Q1")],
+     "такт 1: LANE_LEFT/LANE_RIGHT = 0 (манёвр в очереди), цель не дальше полосы 2; контрпример 1.661 / 97.685 м запрещён; "
+     "маска совпадает с эталоном без ограничения зоны на случайных сценах с очередью", "точное", meas["Q1"], verdict(r"^test_Q1")],
     ["Q2", "Пересечение разметки за время ожидания ABORT", 0.4,
      "нет активации ABORT после пересечения; после пересечения полоса сохраняется", "точное", meas["Q2"], verdict(r"^test_Q2")],
     ["Q3", "Полнота зоны проверки соседей", "0.1/0.4/1.0",

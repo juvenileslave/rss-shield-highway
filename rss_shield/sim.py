@@ -22,7 +22,7 @@ import csv
 import numpy as np
 from highway_env.road.road import Road, RoadNetwork
 
-from .params import DT, FRAMES_PER_DECISION, LENGTH, WIDTH, ACTION_INDEX, SUPERVISORY
+from .params import DT, FRAMES_PER_DECISION, K_TAU, LENGTH, WIDTH, ACTION_INDEX, SUPERVISORY
 from .rss import d_min_long, d_min_lat
 from .shield import lateral_danger
 from .vehicle import DelayedRSSVehicle, ScriptedVehicle
@@ -37,10 +37,10 @@ def lane(road, i):
     return road.network.get_lane(("0", "1", i))
 
 
-def add_ego(road, lane_id, x, v, target_speed=None, initial_active=None):
+def add_ego(road, lane_id, x, v, target_speed=None, initial_active=None, k_tau=K_TAU):
     ln = lane(road, lane_id)
     ego = DelayedRSSVehicle(road, ln.position(x, 0.0), heading=ln.heading_at(x), speed=v,
-                            target_speed=target_speed, initial_active=initial_active)
+                            target_speed=target_speed, initial_active=initial_active, k_tau=k_tau)
     if target_speed is not None:
         ego.speed_index = int(np.argmin(np.abs(ego.target_speeds - target_speed)))
         ego.target_speed = float(ego.target_speeds[ego.speed_index])

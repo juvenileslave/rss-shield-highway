@@ -1,0 +1,20 @@
+pre-fix commit: 84f5592 (README: protocol references instead of QUESTIONS, add sim/ to map (#2))
+overlay from the working tree: tests rss_shield/scenarios.py rss_shield/sim.py
+tests: tests/test_queue_zone_statuses.py
+
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/test_queue_zone_statuses.py ______________
+ImportError while importing test module 'tests/test_queue_zone_statuses.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_queue_zone_statuses.py:11: in <module>
+    import queue_reference as QR
+tests/queue_reference.py:17: in <module>
+    from rss_shield.shield import RSSShield, lc_frames_for
+E   ImportError: cannot import name 'lc_frames_for' from 'rss_shield.shield' (rss_shield/shield.py)
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error
