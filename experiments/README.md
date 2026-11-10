@@ -55,7 +55,7 @@ python -m experiments.pilot --out runs/pilot_quick --quick    # укорочен
 В CI пилот запускает `.github/workflows/pilot.yml`; `report.md` публикуется комментарием к PR,
 все файлы пилота — в артефакте запуска. Модели `.npz` в git не кладутся. Если запуск CI не состоялся,
 те же шаги `pilot.yml` (замер шага, тесты, пилот) выполняются локально: `python sim/bench.py fast 40`,
-`python -m pytest -q experiments/tests`, `python -m experiments.pilot --out runs/local_ci`.
+`python -m pytest -q experiments/tests analysis/tests`, `python -m experiments.pilot --out runs/pilot_run` (зафиксированный прогон — `runs/pilot_run/`).
 
 ## Требования к коду экспериментов
 
