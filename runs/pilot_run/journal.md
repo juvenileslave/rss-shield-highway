@@ -8,7 +8,7 @@
 | numpy | 2.5.4 |
 | highway-env | 1.12.1 |
 | gymnasium | 1.4.0 |
-| commit (HEAD) | 317329c37613587c5b963fe3d6c36f71ef5e9db3 |
+| commit (HEAD) | 961bd2accca865fe4554f7984abd4298d665726c |
 | PR head |  |
 | fast_road | enabled |
 | OMP_NUM_THREADS | 1 |

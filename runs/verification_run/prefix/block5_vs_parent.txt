@@ -1,0 +1,18 @@
+pre-fix commit: 961bd2a (Block 4: end-to-end training pilot on the main-series generator, committed run)
+overlay from the working tree: experiments/tests/test_h1_rules.py
+tests: experiments/tests/test_h1_rules.py
+
+
+==================================== ERRORS ====================================
+_____________ ERROR collecting experiments/tests/test_h1_rules.py ______________
+ImportError while importing test module 'experiments/tests/test_h1_rules.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+experiments/tests/test_h1_rules.py:6: in <module>
+    from experiments import h1
+E   ImportError: cannot import name 'h1' from 'experiments' (experiments/__init__.py)
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error

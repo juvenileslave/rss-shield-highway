@@ -51,6 +51,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 from experiments.dqn import DQN  # noqa: E402
+from experiments import h1  # noqa: E402
 from experiments.env import FAST_ROAD, THREAD_VARS, make_env, reset_cached  # noqa: E402
 from experiments.generator import (I_BRAKE, I_LANE, I_SPEED, N_KIN, QUEUE_CODES, RHOS,  # noqa: E402
                                    SPEED_SEEN, initially_unsafe, window_bounds)
@@ -341,7 +342,7 @@ def evaluate(agent, args, seeds, cache, shield_on=True, reward_kind="Rv", env_co
     for i, s in enumerate(seeds):
         c = run_episode(env, agent, rho=args.rho, shield_on=shield_on, reward_kind=reward_kind,
                         explore=False, episode=i, reset=lambda s=s: reset_cached(env, s, cache),
-                        journal=rows if journal else None)
+                        journal=rows if journal else None, classify=True)
         c["seed"] = s
         stats.append(c)
     return rows, stats
@@ -546,8 +547,10 @@ def final_counters(t):
     return " ".join(f"{k}={t[k]}" for k in FINAL_COUNTERS) + f" | filter {t['shield_cfg']}"
 
 
-def arm(name, filt, reward, tot):
-    return dict(tot, arm=name, filter=filt, reward=reward)
+def arm(name, filt, reward, tot, stats=None):
+    """Totals of an evaluation arm; with the episodes - also its H1 numbers (experiments.h1)."""
+    return dict(tot, arm=name, filter=filt, reward=reward,
+                h1=None if stats is None else h1.h1_summary(stats))
 
 
 # ---------------------------------------------------------------------- report
@@ -579,6 +582,19 @@ def report(args, R):
       f"lateral_rule / зона): обучение — `{R['train_total']['shield_cfg']}`; оценочные плечи с фильтром — "
       + "; ".join(f"{m['arm']}: `{m['shield_cfg']}`" for m in R["arms"] if m["main_series"] is not None)
       + ". Пилот считается пройденным, только если во всех этих плечах использована конфигурация MAIN_SERIES.")
+    a("")
+    a(f"Событие и корректный старт H1 (п. 6, 7.6, 7.7; единое определение — `experiments/h1.py`). Старт корректен, "
+      f"если при t = 0 выполнен продольный порог RSS при ρ = {h1.RHO_START:g} с к лидеру и замыкающему в полосе ego — "
+      f"одно правило для всех плеч и всех ρ. Столкновения плеч с фильтром классифицируются при ρ фильтра, плеч без "
+      f"фильтра (Baseline 1, Baseline 2) — при ρref = {h1.RHO_REF:g} с. Событие H1 — столкновение категории CR_ego_op в "
+      f"эпизоде с корректным стартом. CR_total считается по факту столкновения, независимо от категорий.")
+    a("")
+    a(table(["плечо", "эпизодов", "корректных стартов", "ρ классификации, с", "столкновений", "CR_total",
+             "CR_total (корректные старты)", "событий H1 (CR_ego_op)", "категории столкновений"],
+            [[m["arm"], m["h1"]["n"], m["h1"]["n_valid"], m["h1"]["rho_cls"], m["h1"]["crashes"],
+              m["h1"]["CR_total"], m["h1"]["CR_total_valid"], m["h1"]["h1_events"],
+              "; ".join(f"{k}: {v}" for k, v in sorted(m["h1"]["categories"].items())) or "—"]
+             for m in R["arms"]]))
     z = window_bounds()
     a("")
     a(f"Зона проверки соседей (п. 7.4). Фильтр отбирает соседей по полной зоне reach(v, N) для "
@@ -948,7 +964,7 @@ def main(argv=None):
     R["base_steps"], R["base_learning_starts"] = args.base_steps, args.base_learning_starts
     R["a_raw_episodes"] = min(A_RAW_EPISODES, len(seeds["eval"]))
     R["baselines"] = {}
-    R["arms"] = [arm("Proposed (Режим Б)", "основная серия", "R_v", R["eval_total"])]
+    R["arms"] = [arm("Proposed (Режим Б)", "основная серия", "R_v", R["eval_total"], R["eval"])]
     base_agents = {}
     for name, kind in (("Baseline 1", "Rv"), ("Baseline 2", "RS")):
         ag, slog, eps, tt = train(args, seeds["train"], cache, log, shield_on=False, reward_kind=kind,
@@ -961,15 +977,15 @@ def main(argv=None):
                                     ttc_pen=tb["ttc_pen"], col_pen=tb["col_pen"], time=tt)
         write_csv(out / f"train_episodes_{name.replace(' ', '_').lower()}.csv", eps)
         _, st = evaluate(ag, args, seeds["eval"], cache, shield_on=False, reward_kind=kind, journal=False)
-        R["arms"].append(arm(name, "нет", REWARD_NAMES[kind], totals(st)))
+        R["arms"].append(arm(name, "нет", REWARD_NAMES[kind], totals(st), st))
         base_agents[name] = ag
         log(f"  {name}: " + to_json(R["baselines"][name]).replace("\n", ""))
     b1 = base_agents["Baseline 1"]
     _, st = evaluate(b1, args, seeds["eval"], cache, env_config=dict(obs_mode_a=True), journal=False)
-    R["arms"].append(arm("Режим А (Baseline 1 + фильтр)", "основная серия", "R_v", totals(st)))
+    R["arms"].append(arm("Режим А (Baseline 1 + фильтр)", "основная серия", "R_v", totals(st), st))
     _, st = evaluate(b1, args, seeds["eval"][:R["a_raw_episodes"]], cache,
                      env_config=dict(obs_mode_a=False), journal=False)
-    R["arms"].append(arm("А-raw (без отображения)", "основная серия", "R_v", totals(st)))
+    R["arms"].append(arm("А-raw (без отображения)", "основная серия", "R_v", totals(st), st))
     for m in R["arms"]:
         log("  " + to_json(m).replace("\n", ""))
     phases["Baseline 1 / 2 и Режим А"] = time.perf_counter() - t0
@@ -1031,6 +1047,13 @@ def main(argv=None):
     for m in R["arms"]:
         log(f"  evaluation {m['arm']}: " + final_counters(m))
     log(f"filter configuration of all filtered arms is MAIN_SERIES: {main_series}")
+    log(f"H1 (experiments.h1): correct start at rho = {h1.RHO_START} s for every arm; classification rho = "
+        f"rho of the filter, {h1.RHO_REF} s without a filter; CR_total from the crash flag alone")
+    for m in R["arms"]:
+        s1 = m["h1"]
+        log(f"  {m['arm']}: episodes {s1['n']} correct starts {s1['n_valid']} crashes {s1['crashes']} "
+            f"(CR_total {fmt(s1['CR_total'])}) rho_cls {s1['rho_cls']} H1 events {s1['h1_events']} "
+            f"categories {to_json(s1['categories']).replace(chr(10), '')}")
     ok = ok and main_series
     log("pilot: " + ("OK" if ok else "CHECK FAILED"))
     return 0 if ok else 1

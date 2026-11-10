@@ -40,6 +40,11 @@ rss_shield.accounting and used here through count_step():
   ttc_pen, col_pen sums of the TTC and collision penalties of R_RS over the episode (0 for R_v);
   crash_rear       descriptive: the ego was hit from behind (the nearest other crashed vehicle is
                    behind the ego and overlaps it laterally); not the operational classification;
+  correct_start, rho_cls, crash_category, h1_event
+                   H1 (experiments.h1, the single definition): start rule at rho = 1.0 s for every
+                   arm, classification rho of the arm (rho of the filter, 1.0 s without a filter),
+                   operational category of the collision (classify=True) and the H1 event;
+                   `crashed` alone gives CR_total, independently of the categories;
   jerk_*           JerkRMS over physics frames; jerk_jumps - frames with |da|/dt > 50 m/s^3,
                    jerk_jump_share - their share of the sum of squared jerk, jerk_rms_smooth -
                    JerkRMS without them (informativeness of JerkRMS, pilot section 6).
@@ -54,6 +59,7 @@ from rss_shield.accounting import (LANE_CHANGES, POLICY, block_reason, count_ste
                                    new_counters)
 from rss_shield.params import ACTION_INDEX, ACTIONS, DT, DT_DECISION, LENGTH, WIDTH
 from rss_shield.shield import MAIN_SERIES, RSSShield, ShieldConfig, describe, is_main_series
+from experiments import h1
 from experiments.generator import queued_command
 from experiments.rewards import step_reward
 
@@ -120,14 +126,17 @@ def rear_contact(ego, road):
 
 
 def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=False, explore=False,
-                seed=None, reset=None, episode=0, journal=None, steps_log=None, shield_cfg=None):
+                seed=None, reset=None, episode=0, journal=None, steps_log=None, shield_cfg=None,
+                classify=False):
     """One episode. agent: object with q_values(obs), rng, epsilon() (a DQN for training).
     shield_on=False: Baseline (no filter, every step is a policy step with the full action set).
     explore: epsilon-greedy over A_safe - a random preference vector is passed to the shield, so the
     executed action is uniform over A_safe; a_pi for the counters stays the greedy action.
     reset: optional callable returning (obs, info), e.g. the start-state cache; else reset(seed).
     journal / steps_log: lists that receive one row per decision step.
-    shield_cfg: ShieldConfig keyword arguments besides rho (default MAIN_SERIES)."""
+    shield_cfg: ShieldConfig keyword arguments besides rho (default MAIN_SERIES).
+    classify: record the physics frames and give a collision its operational category (7.7) at
+    the classification rho of the arm (experiments.h1); needed for the H1 event of the episode."""
     obs, _ = reset() if reset is not None else env.reset(seed=seed)
     ego = env.vehicle
     cfg = dict(MAIN_SERIES if shield_cfg is None else shield_cfg)
@@ -139,6 +148,7 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
              crash_intercept=False, crash_sup_active=False, crash_rear=False,
              t_policy=0.0, t_shield=0.0, t_env=0.0, t_learn=0.0)
     x0, lane_prev = float(ego.position[0]), ego.lane_index[2]
+    frames = h1.FrameRecorder(env) if classify else None
     in_fifo = {}                    # FIFO exit frame -> (decision step, policy step) of the command
     open_lc = []                    # lane changes started, not crossed yet: (step or None, direction)
     del ego.acc_log[:]
@@ -163,6 +173,8 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
         queued = queued_command(ego)
         in_fifo[ego.frame + ego.k_tau] = (k, policy)
         target_prev = ego.target_lane_index[2]
+        if frames is not None:
+            frames.decision(cmd)
         obs2, _, term, trunc, _ = env.step(cmd)
         t3 = time.perf_counter()
         r, parts = step_reward(reward_kind, ego, env.road)
@@ -260,6 +272,17 @@ def run_episode(env, agent, rho=0.6, shield_on=True, reward_kind="Rv", train=Fal
     c["unsafe_start"] = info.get("unsafe", {}).get(rho)
     c["unsafe_start_lane"] = info.get("unsafe_lane", {}).get(rho)
     c["recycled"] = getattr(env, "recycled", 0)
+    # H1 (experiments.h1): one start rule and one classification procedure for every arm
+    c["rho_cls"] = h1.classification_rho(shield is not None, rho)
+    c["correct_start"] = h1.correct_start(info) if "unsafe_lane" in info else None
+    c["crash_category"] = None
+    if frames is not None:
+        frames.close()
+        if c["crashed"]:
+            trace = frames.trace()
+            c["crash_category"] = h1.CR_UNC if trace is None else h1.classify_collision(trace, c["rho_cls"])
+    c["h1_event"] = (h1.is_h1_event(c["correct_start"], c["crashed"], c["crash_category"])
+                     if classify else None)
     # filter configuration of the episode: main_series is None without the filter
     c["shield_cfg"] = describe(shield.cfg) if shield is not None else "none"
     c["main_series"] = is_main_series(shield.cfg) if shield is not None else None
